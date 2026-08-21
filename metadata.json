@@ -1,0 +1,6 @@
+{
+  "name": "Hotel ERP",
+  "description": "Enterprise Hotel Resource Planning system with Front Desk, Restaurant POS & Kitchen KDS, Housekeeping, Guest Services, Maintenance, and Instant Room Folio Billing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
