@@ -62,7 +62,7 @@ export class EmailService {
   static async sendWelcomeEmail(user: any): Promise<EmailSendResult> {
     const toEmail = user.email;
     const hotelName = ENV.HOTEL_NAME;
-    const portalUrl = ENV.CLIENT_URL || 'http://localhost:3001';
+    const portalUrl = ENV.WEBSITE_URL || 'https://hotel-website-pi-five.vercel.app';
     const guestTitle = user.title ? `${user.title} ` : '';
     const guestName = user.firstName 
       ? `${guestTitle}${user.firstName} ${user.lastName || ''}`.trim()
@@ -436,7 +436,7 @@ Email: ${ENV.HOTEL_EMAIL}
     }
 
     const hotelName = ENV.HOTEL_NAME || 'Aethelgard Luxury Sanctuary & Resort';
-    const portalUrl = ENV.CLIENT_URL || 'http://localhost:3001';
+    const portalUrl = ENV.WEBSITE_URL || 'https://hotel-website-pi-five.vercel.app';
     const guestName = booking.guestName || booking.name || 'Esteemed Patron';
     const bookingRef = booking.bookingNumber || booking.reservationNumber || booking.referenceNumber || 'RES-CONFIRMED';
     const roomName = booking.roomName || (booking.roomNumber ? `Suite ${booking.roomNumber}` : 'Luxury Sanctuary Suite');

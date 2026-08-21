@@ -11,9 +11,13 @@ services:
         value: production
       - key: PORT
         value: 5000
+      - key: CLIENT_URL
+        value: https://hotel-erp-nine.vercel.app
+      - key: WEBSITE_URL
+        value: https://hotel-website-pi-five.vercel.app
+      - key: CORS_ORIGIN
+        value: '*'
       - key: MONGODB_URI
         sync: false
       - key: JWT_SECRET
         generateValue: true
-      - key: CLIENT_URL
-        sync: false
