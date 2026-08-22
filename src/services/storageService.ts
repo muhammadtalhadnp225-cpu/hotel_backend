@@ -860,17 +860,26 @@ export class StorageService {
     await this.ensureReady();
     if (isMongo()) {
       const query: any = {};
-      if (!filter.includeDeleted) {
+      
+      if (filter.status === 'deleted' || filter.status === 'archived') {
+        query.isDeleted = true;
+      } else if (!filter.includeDeleted && !filter.isBillingLedger) {
         query.isDeleted = { $ne: true };
       }
-      if (filter.status && filter.status !== 'all') query.status = filter.status.toLowerCase();
-      if (filter.paymentStatus && filter.paymentStatus !== 'all') query.paymentStatus = filter.paymentStatus.toLowerCase();
+
+      if (filter.status && filter.status !== 'all' && filter.status !== 'deleted' && filter.status !== 'archived') {
+        query.status = filter.status.toLowerCase();
+      }
+      if (filter.paymentStatus && filter.paymentStatus !== 'all') {
+        query.paymentStatus = filter.paymentStatus.toLowerCase();
+      }
       if (filter.guestId) query.guest = filter.guestId;
       if (filter.roomId) query.$or = [{ room: filter.roomId }, { roomId: filter.roomId }];
+
       const activeBookings = await (Booking as any).find(query).populate('guest').populate('room').sort({ createdAt: -1 }).exec();
 
-      // Include all preserved historical/deleted guest Invoices in Billing Ledger so receipts and folios are NEVER lost
-      if (!filter.roomId && (!filter.status || filter.status === 'all')) {
+      // Only include preserved historical/deleted guest Invoices in Billing Ledger when explicitly requested for Billing
+      if (filter.isBillingLedger || filter.includeArchived) {
         try {
           const invoices = await (Invoice as any).find({}).sort({ issuedAt: -1 }).exec();
           const existingBookingNums = new Set(activeBookings.map((b: any) => String(b.bookingNumber || b._id)));
@@ -914,8 +923,17 @@ export class StorageService {
 
     const bookingsList = InMemoryStore.bookings
       .filter((b) => {
-        if (!filter.includeDeleted && b.isDeleted) return false;
-        if (filter.status && filter.status !== 'all' && b.status.toLowerCase() !== filter.status.toLowerCase())
+        if (filter.status === 'deleted' || filter.status === 'archived') {
+          return b.isDeleted === true;
+        }
+        if (!filter.includeDeleted && !filter.isBillingLedger && b.isDeleted) return false;
+        if (
+          filter.status &&
+          filter.status !== 'all' &&
+          filter.status !== 'deleted' &&
+          filter.status !== 'archived' &&
+          b.status.toLowerCase() !== filter.status.toLowerCase()
+        )
           return false;
         if (
           filter.paymentStatus &&
@@ -929,8 +947,8 @@ export class StorageService {
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-    // Also include preserved historical invoices in InMemoryStore if ledger query
-    if (!filter.roomId && (!filter.status || filter.status === 'all')) {
+    // Also include preserved historical invoices in InMemoryStore only if billing ledger query
+    if (filter.isBillingLedger || filter.includeArchived) {
       const existingBookingNums = new Set(bookingsList.map((b) => String(b.bookingNumber || b._id)));
       for (const inv of InMemoryStore.invoices || []) {
         const num = String(inv.bookingNumber || inv.invoiceNumber?.replace('INV-', ''));
@@ -1192,20 +1210,70 @@ export class StorageService {
     const booking = await this.getBookingById(id);
     if (!booking) return null;
 
-    // 1. Permanently Archive the Folio Receipt & Invoice in the database so it is NEVER lost
+    // 0. Checked-In Guard: Guest who is checked in cannot cancel or delete reservation
+    if (booking.status === 'checked_in') {
+      const err = new Error(
+        'Cannot cancel or delete an active in-house reservation. The guest is currently checked in. Please perform check-out instead.'
+      );
+      (err as any).statusCode = 400;
+      throw err;
+    }
+
+    // 1. Calculate 10% cancellation fee and 90% refund
+    const initialPaid = Number(booking.paidAmount || 0);
+    const fee10Percent = Number((initialPaid * 0.10).toFixed(2));
+    const refund90Percent = Number((initialPaid * 0.90).toFixed(2));
+
+    // Record 90% refund payment transaction if deposit was made
+    if (initialPaid > 0 && refund90Percent > 0) {
+      try {
+        await this.recordPayment({
+          bookingId: booking._id,
+          guestName: booking.guestName || 'Valued Patron',
+          roomNumber: booking.roomNumber || 'N/A',
+          amount: -refund90Percent,
+          paymentMethod: booking.paymentMethod || 'credit_card',
+          status: 'completed',
+          notes: `90% Refund issued on cancellation (10% fee retained: Rs. ${fee10Percent.toFixed(2)})`,
+        });
+      } catch (payErr) {
+        console.error('Error recording cancellation refund payment:', payErr);
+      }
+    }
+
+    // 2. Permanently Archive the Folio Receipt & Invoice in the database with 10% fee & 90% refund details
     try {
-      // Ensure the folio is generated and preserved with full snapshots
-      const folio: any = await this.createOrGetFolioForBooking(id);
-      if (folio && isMongo()) {
-        await (Folio as any).findByIdAndUpdate(folio._id, {
-          isArchived: true,
-          guestName: booking.guestName || booking.guest?.fullName || 'Valued Patron',
-          guestEmail: booking.guestEmail || booking.guest?.email || '',
-          guestPhone: booking.guestPhone || booking.guest?.phone || '',
-          bookingNumber: booking.bookingNumber || booking.reservationNumber,
-          roomNumber: booking.roomNumber || booking.room?.roomNumber || 'N/A',
-          roomType: booking.roomType || booking.room?.type || 'Suite',
-        }).exec();
+      const folioItems: any[] = [
+        {
+          description: `Original Room Stay (${booking.totalNights || 1} nights)`,
+          category: 'room_charge',
+          quantity: booking.totalNights || 1,
+          unitPrice: booking.pricePerNight || booking.roomRate || 0,
+          amount: booking.totalAmount || 0,
+          taxAmount: booking.tax || 0,
+          date: new Date(booking.checkInDate || Date.now()),
+        },
+      ];
+
+      if (initialPaid > 0) {
+        folioItems.push({
+          description: `Cancellation Processing Fee (10% of Deposit Retained)`,
+          category: 'room_charge',
+          quantity: 1,
+          unitPrice: fee10Percent,
+          amount: fee10Percent,
+          taxAmount: 0,
+          date: new Date(),
+        });
+        folioItems.push({
+          description: `Deposit Refund (90% Returned to Guest)`,
+          category: 'discount',
+          quantity: 1,
+          unitPrice: -refund90Percent,
+          amount: -refund90Percent,
+          taxAmount: 0,
+          date: new Date(),
+        });
       }
 
       if (isMongo()) {
@@ -1218,93 +1286,146 @@ export class StorageService {
           ],
         });
 
-        if (!existingInvoice) {
-          await (Invoice as any).create({
-            invoiceNumber: invNum,
-            bookingNumber: booking.bookingNumber || booking.reservationNumber,
-            reservation: booking._id,
-            guest: booking.guest?._id || booking.guest || new mongoose.Types.ObjectId(),
-            guestName: booking.guestName || booking.guest?.fullName || 'Valued Patron',
-            guestEmail: booking.guestEmail || booking.guest?.email || '',
-            guestPhone: booking.guestPhone || booking.guest?.phone || '',
-            roomNumber: booking.roomNumber || booking.room?.roomNumber || 'N/A',
-            roomType: booking.roomType || booking.room?.type || 'Suite',
-            checkInDate: booking.checkInDate || booking.checkIn || new Date(),
-            checkOutDate: booking.checkOutDate || booking.checkOut || new Date(),
-            totalNights: booking.totalNights || 1,
-            roomCharges: booking.subtotal || booking.totalAmount || 0,
-            additionalServicesCharges: 0,
-            restaurantCharges: 0,
-            otherCharges: 0,
-            subtotal: booking.subtotal || booking.totalAmount || 0,
-            discount: booking.discount || 0,
-            tax: booking.tax || 0,
-            taxRate: 8,
-            totalAmount: booking.totalAmount || 0,
-            paidAmount: booking.paidAmount || (booking.paymentStatus === 'paid' ? booking.totalAmount : 0),
-            balance: Math.max(0, (booking.totalAmount || 0) - (booking.paidAmount || 0)),
-            paymentMethod: booking.paymentMethod || 'credit_card',
-            paymentReceiptNumber: `REC-${booking.bookingNumber || booking.reservationNumber}`,
-            status: booking.paymentStatus === 'paid' ? 'paid' : (booking.paidAmount > 0 ? 'partially_paid' : 'pending'),
-            issuedAt: booking.createdAt || new Date(),
-            items: [
-              {
-                description: `Room Accommodation (${booking.totalNights || 1} nights)`,
-                category: 'room_charge',
-                quantity: booking.totalNights || 1,
-                unitPrice: booking.pricePerNight || booking.roomRate || 0,
-                amount: booking.totalAmount || 0,
-              },
-            ],
-            notes: `Preserved Folio Receipt for ${booking.guestName}. Reservation Ref: ${booking.bookingNumber || booking.reservationNumber}.`,
-          });
+        const invoicePayload = {
+          invoiceNumber: invNum,
+          bookingNumber: booking.bookingNumber || booking.reservationNumber,
+          reservation: booking._id,
+          guest: booking.guest?._id || booking.guest || new mongoose.Types.ObjectId(),
+          guestName: booking.guestName || booking.guest?.fullName || 'Valued Patron',
+          guestEmail: booking.guestEmail || booking.guest?.email || '',
+          guestPhone: booking.guestPhone || booking.guest?.phone || '',
+          roomNumber: booking.roomNumber || booking.room?.roomNumber || 'N/A',
+          roomType: booking.roomType || booking.room?.type || 'Suite',
+          checkInDate: booking.checkInDate || booking.checkIn || new Date(),
+          checkOutDate: booking.checkOutDate || booking.checkOut || new Date(),
+          totalNights: booking.totalNights || 1,
+          roomCharges: initialPaid > 0 ? fee10Percent : 0,
+          additionalServicesCharges: 0,
+          restaurantCharges: 0,
+          otherCharges: 0,
+          subtotal: initialPaid > 0 ? fee10Percent : 0,
+          discount: 0,
+          tax: 0,
+          taxRate: 0,
+          totalAmount: initialPaid > 0 ? fee10Percent : 0,
+          paidAmount: initialPaid > 0 ? fee10Percent : 0,
+          balance: 0,
+          paymentMethod: booking.paymentMethod || 'credit_card',
+          paymentReceiptNumber: `REC-${booking.bookingNumber || booking.reservationNumber}`,
+          status: 'paid',
+          issuedAt: booking.createdAt || new Date(),
+          items: folioItems,
+          notes: initialPaid > 0
+            ? `Reservation Cancelled/Deleted before check-in. 10% Fee Retained: Rs. ${fee10Percent.toFixed(2)}, 90% Refunded: Rs. ${refund90Percent.toFixed(2)}.`
+            : `Reservation Cancelled/Deleted before check-in. No advance deposit was collected.`,
+        };
+
+        if (existingInvoice) {
+          await (Invoice as any).findByIdAndUpdate(existingInvoice._id, invoicePayload).exec();
+        } else {
+          await (Invoice as any).create(invoicePayload);
+        }
+
+        // Also update Folio in Mongo
+        let existingFolio = await (Folio as any).findOne({
+          $or: [
+            { reservation: booking._id },
+            { bookingNumber: booking.bookingNumber || booking.reservationNumber },
+          ],
+        }).exec();
+
+        const folioPayload = {
+          folioNumber: existingFolio?.folioNumber || `FOL-${new Date().getFullYear()}-${Math.floor(10000 + Math.random() * 90000)}`,
+          guest: booking.guest?._id || booking.guest,
+          guestName: booking.guestName || booking.guest?.fullName || 'Valued Patron',
+          guestEmail: booking.guestEmail || booking.guest?.email || '',
+          guestPhone: booking.guestPhone || booking.guest?.phone || '',
+          guestAddress: booking.guestAddress || booking.guest?.address || '',
+          reservation: booking._id,
+          bookingNumber: booking.bookingNumber || booking.reservationNumber,
+          room: booking.room?._id || booking.room || booking.roomId,
+          roomNumber: booking.roomNumber || booking.room?.roomNumber || 'N/A',
+          roomType: booking.roomType || booking.room?.type || 'Suite',
+          items: folioItems,
+          totalCharges: initialPaid > 0 ? fee10Percent : 0,
+          totalPayments: initialPaid > 0 ? fee10Percent : 0,
+          balance: 0,
+          status: 'settled',
+          isArchived: true,
+          notes: initialPaid > 0
+            ? `Cancelled before check-in. 10% Fee Retained (Rs. ${fee10Percent.toFixed(2)}), 90% Refund Issued (Rs. ${refund90Percent.toFixed(2)}).`
+            : `Cancelled before check-in. No deposit charged.`,
+        };
+
+        if (existingFolio) {
+          await (Folio as any).findByIdAndUpdate(existingFolio._id, folioPayload).exec();
+        } else {
+          await new Folio(folioPayload).save();
         }
       } else {
         // InMemory archive
         InMemoryStore.invoices = InMemoryStore.invoices || [];
         const invNum = `INV-${booking.bookingNumber || booking.reservationNumber || Math.floor(10000 + Math.random() * 90000)}`;
-        const exists = InMemoryStore.invoices.some((i) => i.bookingNumber === (booking.bookingNumber || booking.reservationNumber));
-        if (!exists) {
-          InMemoryStore.invoices.push({
-            _id: new mongoose.Types.ObjectId().toString(),
-            invoiceNumber: invNum,
-            bookingNumber: booking.bookingNumber || booking.reservationNumber,
-            reservation: booking._id,
-            guest: booking.guest,
-            guestName: booking.guestName || 'Valued Patron',
-            guestEmail: booking.guestEmail || '',
-            guestPhone: booking.guestPhone || '',
-            roomNumber: booking.roomNumber || 'N/A',
-            roomType: booking.roomType || 'Suite',
-            checkInDate: booking.checkInDate || new Date(),
-            checkOutDate: booking.checkOutDate || new Date(),
-            totalNights: booking.totalNights || 1,
-            roomCharges: booking.subtotal || booking.totalAmount || 0,
-            additionalServicesCharges: 0,
-            restaurantCharges: 0,
-            otherCharges: 0,
-            subtotal: booking.subtotal || booking.totalAmount || 0,
-            discount: booking.discount || 0,
-            tax: booking.tax || 0,
-            taxRate: 8,
-            totalAmount: booking.totalAmount || 0,
-            paidAmount: booking.paidAmount || 0,
-            balance: Math.max(0, (booking.totalAmount || 0) - (booking.paidAmount || 0)),
-            paymentMethod: booking.paymentMethod || 'credit_card',
-            status: booking.paymentStatus === 'paid' ? 'paid' : 'pending',
-            issuedAt: booking.createdAt || new Date(),
-          });
+        const idx = InMemoryStore.invoices.findIndex((i) => i.bookingNumber === (booking.bookingNumber || booking.reservationNumber));
+        const invRecord = {
+          _id: new mongoose.Types.ObjectId().toString(),
+          invoiceNumber: invNum,
+          bookingNumber: booking.bookingNumber || booking.reservationNumber,
+          reservation: booking._id,
+          guest: booking.guest,
+          guestName: booking.guestName || 'Valued Patron',
+          guestEmail: booking.guestEmail || '',
+          guestPhone: booking.guestPhone || '',
+          roomNumber: booking.roomNumber || 'N/A',
+          roomType: booking.roomType || 'Suite',
+          checkInDate: booking.checkInDate || new Date(),
+          checkOutDate: booking.checkOutDate || new Date(),
+          totalNights: booking.totalNights || 1,
+          roomCharges: initialPaid > 0 ? fee10Percent : 0,
+          additionalServicesCharges: 0,
+          restaurantCharges: 0,
+          otherCharges: 0,
+          subtotal: initialPaid > 0 ? fee10Percent : 0,
+          discount: 0,
+          tax: 0,
+          taxRate: 0,
+          totalAmount: initialPaid > 0 ? fee10Percent : 0,
+          paidAmount: initialPaid > 0 ? fee10Percent : 0,
+          balance: 0,
+          paymentMethod: booking.paymentMethod || 'credit_card',
+          status: 'paid',
+          items: folioItems,
+          notes: initialPaid > 0
+            ? `Reservation Cancelled/Deleted before check-in. 10% Fee Retained: Rs. ${fee10Percent.toFixed(2)}, 90% Refunded: Rs. ${refund90Percent.toFixed(2)}.`
+            : `Reservation Cancelled/Deleted before check-in. No advance deposit was collected.`,
+          issuedAt: booking.createdAt || new Date(),
+        };
+
+        if (idx !== -1) {
+          InMemoryStore.invoices[idx] = invRecord;
+        } else {
+          InMemoryStore.invoices.push(invRecord);
         }
       }
     } catch (invErr) {
       console.error('Failed to auto-archive invoice on booking deletion:', invErr);
     }
 
-    // 2. Soft-delete the reservation (mark as deleted & cancelled) so Folio & Billing records keep their referential integrity
+    // 3. Soft-delete the reservation and update paidAmount to the 10% fee
+    const updatePayload = {
+      isDeleted: true,
+      status: 'cancelled',
+      paidAmount: fee10Percent,
+      totalAmount: fee10Percent > 0 ? fee10Percent : Number(booking.totalAmount || 0),
+      paymentStatus: refund90Percent > 0 ? 'refunded' : (fee10Percent > 0 ? 'paid' : 'pending'),
+      cancelledAt: new Date(),
+      cancellationReason: booking.cancellationReason || 'Cancelled before check-in (10% fee retained, 90% refunded)',
+    };
+
     if (isMongo()) {
       const updated = await (Booking as any).findByIdAndUpdate(
         id,
-        { isDeleted: true, status: 'cancelled', cancelledAt: new Date() },
+        updatePayload,
         { new: true }
       ).exec();
 
@@ -1317,14 +1438,16 @@ export class StorageService {
           await room.save();
         }
       }
+      await this.syncRoomStatusesWithBookings();
       return updated;
     }
 
     const index = InMemoryStore.bookings.findIndex((b) => b._id === id);
     if (index === -1) return null;
-    InMemoryStore.bookings[index].isDeleted = true;
-    InMemoryStore.bookings[index].status = 'cancelled';
-    InMemoryStore.bookings[index].cancelledAt = new Date();
+    InMemoryStore.bookings[index] = {
+      ...InMemoryStore.bookings[index],
+      ...updatePayload,
+    };
 
     const rId = booking.roomId || (booking.room?._id || booking.room);
     if (rId) {
@@ -1334,6 +1457,7 @@ export class StorageService {
         room.currentBookingId = null;
       }
     }
+    await this.syncRoomStatusesWithBookings();
     return InMemoryStore.bookings[index];
   }
 
