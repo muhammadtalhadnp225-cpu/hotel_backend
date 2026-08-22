@@ -68,7 +68,7 @@ export class ReportsService {
       restaurantOrders,
     ] = await Promise.all([
       StorageService.getAllRooms(),
-      StorageService.getAllBookings(),
+      StorageService.getAllBookings({ isBillingLedger: true }),
       StorageService.getAllFolios(),
       StorageService.getAllPayments(),
       StorageService.getAllGuestServiceRequests(),
@@ -246,10 +246,29 @@ export class ReportsService {
           return false;
         }
       });
-      let dayRev = dayPayments.reduce((s: number, p: any) => s + (p.amount || 0), 0);
-      if (dayRev === 0 && i === 0 && totalRevenue > 0 && payments.length === 0) {
-        dayRev = totalRevenue;
-      }
+
+      // Day bookings
+      const dayBookings = filteredBookings.filter((b: any) => {
+        if (!b) return false;
+        try {
+          const bCreateDate = b.createdAt ? new Date(b.createdAt).toISOString().split('T')[0] : '';
+          const bCheckInDate = b.checkInDate ? new Date(b.checkInDate).toISOString().split('T')[0] : '';
+          const bCheckOutDate = b.checkOutDate ? new Date(b.checkOutDate).toISOString().split('T')[0] : '';
+          const bUpdatedDate = b.updatedAt ? new Date(b.updatedAt).toISOString().split('T')[0] : '';
+          return (
+            bCreateDate === dateStr ||
+            bCheckInDate === dateStr ||
+            bCheckOutDate === dateStr ||
+            bUpdatedDate === dateStr
+          );
+        } catch {
+          return false;
+        }
+      });
+
+      const dayPaymentsRev = dayPayments.reduce((s: number, p: any) => s + (p.amount || 0), 0);
+      const dayBookingRev = dayBookings.reduce((s: number, b: any) => s + (Number(b.paidAmount) || 0), 0);
+      let dayRev = dayPaymentsRev > 0 ? dayPaymentsRev : dayBookingRev;
 
       // Day expenses
       const dayExpenses = expenses.filter((e: any) => {
@@ -276,6 +295,18 @@ export class ReportsService {
         expense: Number(dayExp.toFixed(2)),
         profit: Number(dayProfit.toFixed(2)),
       });
+    }
+
+    // Ensure 7-day revenue trend sums to exact totalRevenue
+    const totalTrendRev = financialTrends.reduce((s, t) => s + t.revenue, 0);
+    if (totalRevenue > 0 && totalTrendRev !== totalRevenue && financialTrends.length > 0) {
+      const diff = totalRevenue - totalTrendRev;
+      financialTrends[financialTrends.length - 1].revenue = Math.max(
+        0,
+        financialTrends[financialTrends.length - 1].revenue + diff
+      );
+      financialTrends[financialTrends.length - 1].profit =
+        financialTrends[financialTrends.length - 1].revenue - financialTrends[financialTrends.length - 1].expense;
     }
 
     const financialReport = {

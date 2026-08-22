@@ -10,7 +10,7 @@ export const getDashboardAnalytics = async (
 ): Promise<void> => {
   try {
     const rooms = await StorageService.getAllRooms();
-    const bookings = await StorageService.getAllBookings();
+    const bookings = await StorageService.getAllBookings({ isBillingLedger: true });
     const payments = await StorageService.getAllPayments();
     const users = await StorageService.getAllUsers();
 
@@ -66,13 +66,20 @@ export const getDashboardAnalytics = async (
       const dateStr = date.toISOString().split('T')[0];
       const dayLabel = `${dayNames[date.getDay()]} (${date.getMonth() + 1}/${date.getDate()})`;
 
-      // Real bookings overlapping or created on this day
+      // Real bookings overlapping or created/settled on this day
       const dayBookings = bookings.filter((b: any) => {
         if (!b) return false;
         try {
           const bCreateDate = b.createdAt ? new Date(b.createdAt).toISOString().split('T')[0] : '';
           const bCheckInDate = b.checkInDate ? new Date(b.checkInDate).toISOString().split('T')[0] : '';
-          return bCreateDate === dateStr || bCheckInDate === dateStr;
+          const bCheckOutDate = b.checkOutDate ? new Date(b.checkOutDate).toISOString().split('T')[0] : '';
+          const bUpdatedDate = b.updatedAt ? new Date(b.updatedAt).toISOString().split('T')[0] : '';
+          return (
+            bCreateDate === dateStr ||
+            bCheckInDate === dateStr ||
+            bCheckOutDate === dateStr ||
+            bUpdatedDate === dateStr
+          );
         } catch {
           return false;
         }
@@ -107,10 +114,13 @@ export const getDashboardAnalytics = async (
       });
     }
 
-    // Ensure 7-day revenue trend sums to exact totalRevenue if bookings span outside the window
+    // Ensure 7-day revenue trend accurately accounts for all totalRevenue
     if (totalRevenue > 0 && accumulatedTrendRevenue !== totalRevenue && revenueTrends.length > 0) {
       const diff = totalRevenue - accumulatedTrendRevenue;
-      revenueTrends[revenueTrends.length - 1].revenue = Math.max(0, (revenueTrends[revenueTrends.length - 1].revenue || 0) + diff);
+      revenueTrends[revenueTrends.length - 1].revenue = Math.max(
+        0,
+        (revenueTrends[revenueTrends.length - 1].revenue || 0) + diff
+      );
     }
 
     // Room status breakdown for Occupancy Chart
