@@ -43,6 +43,8 @@ export interface IInvoice extends Document {
   paymentMethod: string;
   paymentReceiptNumber?: string;
   status: InvoiceStatus;
+  isArchived?: boolean;
+  isDeleted?: boolean;
   issuedAt: Date;
   issuedBy?: mongoose.Types.ObjectId;
   issuedByName?: string;
@@ -231,6 +233,14 @@ const InvoiceSchema: Schema<IInvoice> = new Schema(
       enum: ['paid', 'pending', 'partially_paid', 'void'],
       default: 'paid',
       index: true,
+    },
+    isArchived: {
+      type: Boolean,
+      default: false,
+    },
+    isDeleted: {
+      type: Boolean,
+      default: false,
     },
     issuedAt: {
       type: Date,

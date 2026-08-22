@@ -1134,6 +1134,7 @@ export class StorageService {
       const obj = savedBooking.toObject ? savedBooking.toObject() : savedBooking;
       InMemoryStore.bookings = InMemoryStore.bookings || [];
       InMemoryStore.bookings.unshift(obj);
+      await this.syncBookingInvoice(obj);
       return obj;
     }
 
@@ -1155,6 +1156,7 @@ export class StorageService {
       }
     }
 
+    await this.syncBookingInvoice(newBooking);
     return newBooking;
   }
 
@@ -1196,6 +1198,9 @@ export class StorageService {
     if (isMongo()) {
       const updated = await (Booking as any).findByIdAndUpdate(id, updateData, { new: true }).exec();
       await this.syncRoomStatusesWithBookings();
+      if (updated) {
+        await this.syncBookingInvoice(updated.toObject ? updated.toObject() : updated);
+      }
       return updated;
     }
 
@@ -1207,6 +1212,9 @@ export class StorageService {
       updatedAt: new Date(),
     };
     await this.syncRoomStatusesWithBookings();
+    if (InMemoryStore.bookings[index]) {
+      await this.syncBookingInvoice(InMemoryStore.bookings[index]);
+    }
     return InMemoryStore.bookings[index];
   }
 
@@ -1531,6 +1539,202 @@ export class StorageService {
           String(p.bookingId) !== String(cleanRef)
       );
     }
+  }
+
+  // ================= INVOICES =================
+  static async syncBookingInvoice(booking: any) {
+    await this.ensureReady();
+    if (!booking) return null;
+
+    const bNumber = booking.bookingNumber || booking.reservationNumber || 'RES';
+    const invNum = `INV-${bNumber}`;
+    const nights = Math.max(1, Number(booking.totalNights) || 1);
+    const subtotal = Number(booking.subtotal || booking.totalAmount || 0);
+    const totalAmount = Number(booking.totalAmount || 0);
+    const paidAmount = Number(booking.paidAmount || 0);
+    const balance = Math.max(0, totalAmount - paidAmount);
+
+    let status: any = 'pending';
+    if (booking.status === 'checked_out' || (paidAmount >= totalAmount && totalAmount > 0)) {
+      status = 'paid';
+    } else if (paidAmount > 0) {
+      status = 'partially_paid';
+    }
+
+    const items = [
+      {
+        description: `Room Accommodation - ${booking.roomName || (booking.roomNumber ? `Room ${booking.roomNumber}` : 'Suite')} (${nights} nights)`,
+        category: 'room_charge',
+        quantity: nights,
+        unitPrice: Number(booking.roomRate || booking.pricePerNight || (nights > 0 ? subtotal / nights : subtotal)),
+        amount: subtotal,
+        taxAmount: Number(booking.tax || 0),
+      },
+    ];
+
+    const invoicePayload: any = {
+      invoiceNumber: invNum,
+      bookingNumber: bNumber,
+      reservation: booking._id,
+      guest: booking.guest?._id || booking.guest || new mongoose.Types.ObjectId(),
+      guestName: booking.guestName || 'Valued Guest',
+      guestEmail: booking.guestEmail || '',
+      guestPhone: booking.guestPhone || '',
+      guestAddress: booking.guestAddress || '',
+      room: booking.room?._id || booking.roomId || booking.room,
+      roomNumber: booking.roomNumber || 'N/A',
+      roomType: booking.roomType || 'Deluxe',
+      checkInDate: booking.checkInDate || booking.checkIn || new Date(),
+      checkOutDate: booking.checkOutDate || booking.checkOut || new Date(),
+      totalNights: nights,
+      roomCharges: subtotal,
+      additionalServicesCharges: 0,
+      restaurantCharges: 0,
+      otherCharges: 0,
+      subtotal,
+      discount: Number(booking.discount || 0),
+      discountReason: booking.discountReason || '',
+      tax: Number(booking.tax || 0),
+      taxRate: 10,
+      totalAmount,
+      paidAmount,
+      balance,
+      paymentMethod: booking.paymentMethod || 'credit_card',
+      paymentReceiptNumber: booking.paymentReceiptNumber || `REC-${bNumber}`,
+      status,
+      isArchived: booking.isArchived || booking.isDeleted ? true : false,
+      isDeleted: false,
+      issuedAt: booking.createdAt || new Date(),
+      items: (booking.items && booking.items.length > 0) ? booking.items : items,
+      notes: booking.notes || '',
+    };
+
+    if (isMongo()) {
+      const updated = await (Invoice as any).findOneAndUpdate(
+        { $or: [{ bookingNumber: bNumber }, { reservation: booking._id }, { invoiceNumber: invNum }] },
+        invoicePayload,
+        { upsert: true, new: true }
+      ).exec();
+      return updated;
+    } else {
+      InMemoryStore.invoices = InMemoryStore.invoices || [];
+      const idx = InMemoryStore.invoices.findIndex(
+        (i) => i.bookingNumber === bNumber || String(i.reservation) === String(booking._id) || i.invoiceNumber === invNum
+      );
+      if (idx !== -1) {
+        InMemoryStore.invoices[idx] = { ...InMemoryStore.invoices[idx], ...invoicePayload };
+        return InMemoryStore.invoices[idx];
+      } else {
+        const newInv = { _id: new mongoose.Types.ObjectId().toString(), ...invoicePayload };
+        InMemoryStore.invoices.unshift(newInv);
+        return newInv;
+      }
+    }
+  }
+
+  static async createInvoice(data: any) {
+    await this.ensureReady();
+    const bNumber = data.bookingNumber || data.reservationNumber || Math.floor(10000 + Math.random() * 90000);
+    const invoiceNumber = data.invoiceNumber || `INV-${bNumber}`;
+
+    const completeData: any = {
+      ...data,
+      invoiceNumber,
+      bookingNumber: bNumber,
+      issuedAt: data.issuedAt || new Date(),
+      isArchived: data.isArchived || false,
+      isDeleted: false,
+      status: data.status || 'paid',
+    };
+
+    if (isMongo()) {
+      const inv = await (Invoice as any).findOneAndUpdate(
+        { $or: [{ invoiceNumber }, { bookingNumber: bNumber }, { reservation: data.reservation }] },
+        completeData,
+        { upsert: true, new: true }
+      ).exec();
+      return inv;
+    }
+
+    InMemoryStore.invoices = InMemoryStore.invoices || [];
+    const idx = InMemoryStore.invoices.findIndex((i) => i.invoiceNumber === invoiceNumber || i.bookingNumber === bNumber);
+    if (idx !== -1) {
+      InMemoryStore.invoices[idx] = { ...InMemoryStore.invoices[idx], ...completeData };
+      return InMemoryStore.invoices[idx];
+    }
+    const newInv = { _id: new mongoose.Types.ObjectId().toString(), ...completeData };
+    InMemoryStore.invoices.unshift(newInv);
+    return newInv;
+  }
+
+  static async getAllInvoices(filter: any = {}) {
+    await this.ensureReady();
+    if (isMongo()) {
+      const query: any = {};
+      if (!filter.includeDeleted) {
+        query.isDeleted = { $ne: true };
+      }
+      if (filter.status && filter.status !== 'all') {
+        query.status = filter.status;
+      }
+      if (filter.guestId) {
+        query.guest = filter.guestId;
+      }
+      if (filter.search && filter.search.trim()) {
+        const regex = new RegExp(filter.search.trim(), 'i');
+        query.$or = [
+          { invoiceNumber: regex },
+          { bookingNumber: regex },
+          { guestName: regex },
+          { guestPhone: regex },
+          { guestEmail: regex },
+          { roomNumber: regex },
+        ];
+      }
+      return await (Invoice as any).find(query).sort({ issuedAt: -1, createdAt: -1 }).lean().exec();
+    }
+
+    return (InMemoryStore.invoices || []).filter((inv) => {
+      if (!filter.includeDeleted && inv.isDeleted) return false;
+      if (filter.status && filter.status !== 'all' && inv.status !== filter.status) return false;
+      if (filter.guestId && String(inv.guest) !== String(filter.guestId)) return false;
+      if (filter.search && filter.search.trim()) {
+        const s = filter.search.toLowerCase().trim();
+        const matches =
+          (inv.invoiceNumber && inv.invoiceNumber.toLowerCase().includes(s)) ||
+          (inv.bookingNumber && inv.bookingNumber.toLowerCase().includes(s)) ||
+          (inv.guestName && inv.guestName.toLowerCase().includes(s)) ||
+          (inv.roomNumber && String(inv.roomNumber).includes(s));
+        if (!matches) return false;
+      }
+      return true;
+    });
+  }
+
+  static async getInvoiceById(idOrNumber: string) {
+    await this.ensureReady();
+    if (!idOrNumber) return null;
+    const cleanNum = String(idOrNumber).trim();
+    if (isMongo()) {
+      const isOid = mongoose.isValidObjectId(cleanNum);
+      const orClauses: any[] = [
+        { invoiceNumber: cleanNum },
+        { invoiceNumber: `INV-${cleanNum}` },
+        { bookingNumber: cleanNum },
+      ];
+      if (isOid) {
+        orClauses.push({ _id: new mongoose.Types.ObjectId(cleanNum) });
+        orClauses.push({ reservation: new mongoose.Types.ObjectId(cleanNum) });
+      }
+      return await (Invoice as any).findOne({ $or: orClauses }).lean().exec();
+    }
+    return (InMemoryStore.invoices || []).find(
+      (i) =>
+        String(i._id) === cleanNum ||
+        i.invoiceNumber === cleanNum ||
+        i.invoiceNumber === `INV-${cleanNum}` ||
+        i.bookingNumber === cleanNum
+    );
   }
 
   // ================= GUESTS =================
@@ -2243,57 +2447,6 @@ export class StorageService {
     return InMemoryStore.services.find((s) => s._id === id) || null;
   }
 
-  // ================= INVOICES =================
-  static async getAllInvoices(filter: any = {}) {
-    await this.ensureReady();
-    if (isMongo()) {
-      const query: any = {};
-      if (filter.guestId) query.guest = filter.guestId;
-      if (filter.reservationId) query.reservation = filter.reservationId;
-      return await (Invoice as any).find(query).populate('guest').populate('room').populate('reservation').sort({ issuedAt: -1 }).exec();
-    }
-
-    return InMemoryStore.invoices
-      .filter((inv) => {
-        if (filter.guestId && String(inv.guest) !== String(filter.guestId)) return false;
-        if (filter.reservationId && String(inv.reservation) !== String(filter.reservationId)) return false;
-        return true;
-      })
-      .sort((a, b) => new Date(b.issuedAt).getTime() - new Date(a.issuedAt).getTime());
-  }
-
-  static async getInvoiceById(id: string) {
-    await this.ensureReady();
-    if (isMongo()) {
-      return await (Invoice as any).findById(id).populate('guest').populate('room').populate('reservation').exec();
-    }
-    return InMemoryStore.invoices.find((inv) => inv._id === id || inv.invoiceNumber === id) || null;
-  }
-
-  static async createInvoice(invoiceData: any) {
-    await this.ensureReady();
-    const invoiceNumber = `INV-${new Date().getFullYear()}-${Math.floor(10000 + Math.random() * 90000)}`;
-    const completeData = {
-      ...invoiceData,
-      invoiceNumber: invoiceData.invoiceNumber || invoiceNumber,
-      issuedAt: new Date(),
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-
-    if (isMongo()) {
-      const invoice = new Invoice(completeData);
-      return await invoice.save();
-    }
-
-    const newInvoice = {
-      _id: new mongoose.Types.ObjectId().toString(),
-      ...completeData,
-    };
-    InMemoryStore.invoices.unshift(newInvoice);
-    return newInvoice;
-  }
-
   // ================= HOUSEKEEPING =================
   static async getAllHousekeepingTasks(filter: any = {}) {
     await this.ensureReady();
@@ -2632,6 +2785,12 @@ export class StorageService {
     const otherCharges = folioItems
       .filter((i) => ['damage', 'other'].includes(i.category))
       .reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
+
+    const grossSubtotal = roomCharges + additionalServicesCharges + restaurantCharges + otherCharges;
+    const discount = Number(payload.discount || 0);
+    const taxableSubtotal = Math.max(0, grossSubtotal - discount);
+    const taxRate = 10;
+    const tax = Math.round(taxableSubtotal * 0.1 * 100) / 100;
 
     const finalTotalAmount = (folioItems && folioItems.length > 0)
       ? (taxableSubtotal + tax)
