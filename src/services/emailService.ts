@@ -834,8 +834,12 @@ ${hotelName}
     const from = options.from || `"${hotelName}" <${senderEmail}>`;
     const replyTo = options.replyTo || ENV.HOTEL_EMAIL || senderEmail;
 
-    // 1. Check if Brevo (Sendinblue) HTTPS API Key is provided (Port 443 HTTPS - Delivers to ANY recipient!)
+    console.log(`[EmailService] Attempting to send email to [${options.to}] | Subject: "${options.subject}"`);
+    console.log(`[EmailService] Providers available — Brevo: ${!!ENV.BREVO_API_KEY}, Resend: ${!!ENV.RESEND_API_KEY}, SMTP_PASS: ${!!ENV.SMTP_PASS}`);
+
+    // 1. Brevo (Sendinblue) HTTPS API — works on cloud, no port blocking
     if (ENV.BREVO_API_KEY && ENV.BREVO_API_KEY.trim().length > 0) {
+      console.log('[EmailService] Trying Brevo HTTPS API...');
       try {
         const response = await fetch('https://api.brevo.com/v3/smtp/email', {
           method: 'POST',
@@ -856,22 +860,21 @@ ${hotelName}
 
         const data: any = await response.json();
         if (response.ok && data.messageId) {
-          console.log(`[EmailService] ✉ Email dispatched via Brevo HTTPS API to [${options.to}]. Subject: "${options.subject}". (ID: ${data.messageId})`);
-          return {
-            success: true,
-            messageId: data.messageId,
-            provider: 'brevo_https',
-          };
+          console.log(`[EmailService] ✉ Brevo SUCCESS → [${options.to}] (ID: ${data.messageId})`);
+          return { success: true, messageId: data.messageId, provider: 'brevo_https' };
         } else {
-          console.warn(`[EmailService] Brevo HTTPS API returned error:`, data);
+          console.warn(`[EmailService] Brevo FAILED (HTTP ${response.status}):`, JSON.stringify(data));
         }
       } catch (brevoErr: any) {
-        console.warn(`[EmailService] Brevo dispatch attempt warning: ${brevoErr.message}.`);
+        console.warn(`[EmailService] Brevo exception: ${brevoErr.message}`);
       }
+    } else {
+      console.log('[EmailService] Brevo skipped — BREVO_API_KEY not set on server.');
     }
 
-    // 2. Check if Resend HTTPS API Key is provided (Port 443 HTTPS)
+    // 2. Resend HTTPS API — fallback
     if (ENV.RESEND_API_KEY && ENV.RESEND_API_KEY.trim().length > 0) {
+      console.log('[EmailService] Trying Resend HTTPS API...');
       try {
         const resendFrom = `"${hotelName}" <onboarding@resend.dev>`;
         const response = await fetch('https://api.resend.com/emails', {
@@ -892,21 +895,20 @@ ${hotelName}
 
         const data: any = await response.json();
         if (response.ok && data.id) {
-          console.log(`[EmailService] ✉ Email dispatched via Resend HTTPS API to [${options.to}]. Subject: "${options.subject}". (ID: ${data.id})`);
-          return {
-            success: true,
-            messageId: data.id,
-            provider: 'resend_https',
-          };
+          console.log(`[EmailService] ✉ Resend SUCCESS → [${options.to}] (ID: ${data.id})`);
+          return { success: true, messageId: data.id, provider: 'resend_https' };
         } else {
-          console.warn(`[EmailService] Resend HTTPS API returned error:`, data);
+          console.warn(`[EmailService] Resend FAILED (HTTP ${response.status}):`, JSON.stringify(data));
         }
       } catch (resendErr: any) {
-        console.warn(`[EmailService] Resend dispatch attempt warning: ${resendErr.message}.`);
+        console.warn(`[EmailService] Resend exception: ${resendErr.message}`);
       }
+    } else {
+      console.log('[EmailService] Resend skipped — RESEND_API_KEY not set on server.');
     }
 
-    // 2. SMTP Transporter Attempt with strict 4.5s race timeout
+    // 3. Gmail SMTP — last resort (may be blocked by cloud firewall)
+    console.log('[EmailService] Trying Gmail SMTP (8s timeout)...');
     try {
       const transporter = this.getTransporter();
       const sendPromise = transporter.sendMail({
@@ -919,25 +921,16 @@ ${hotelName}
       });
 
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('SMTP connection timed out after 4500ms')), 4500)
+        setTimeout(() => reject(new Error('SMTP connection timed out after 8000ms')), 8000)
       );
 
       const info: any = await Promise.race([sendPromise, timeoutPromise]);
-
-      console.log(`[EmailService] ✉ Email dispatched to [${options.to}]. Subject: "${options.subject}". From: [${from}] (ID: ${info.messageId})`);
-      
-      return {
-        success: true,
-        messageId: info.messageId,
-        provider: 'smtp',
-      };
+      console.log(`[EmailService] ✉ SMTP SUCCESS → [${options.to}] (ID: ${info.messageId})`);
+      return { success: true, messageId: info.messageId, provider: 'smtp' };
     } catch (error: any) {
-      console.warn(`[EmailService] ⚠️ SMTP dispatch warning for [${options.to}]: ${error.message}`);
-      return {
-        success: false,
-        error: error.message,
-        provider: 'smtp_failed',
-      };
+      console.warn(`[EmailService] ⚠️ SMTP FAILED for [${options.to}]: ${error.message}`);
+      console.warn('[EmailService] All 3 email providers exhausted. Email NOT delivered. Check server env vars: BREVO_API_KEY, RESEND_API_KEY, SMTP_PASS.');
+      return { success: false, error: error.message, provider: 'all_failed' };
     }
   }
 }
