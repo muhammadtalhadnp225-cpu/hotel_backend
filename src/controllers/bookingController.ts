@@ -470,31 +470,14 @@ export const updateBookingStatus = async (
         updatePayload.cancellationReason = cancellationReason;
       }
 
-      // 10% fee and 90% refund calculation before check-in
-      const initialPaid = Number(booking.paidAmount || 0);
-      const fee10Percent = Number((initialPaid * 0.10).toFixed(2));
-      const refund90Percent = Number((initialPaid * 0.90).toFixed(2));
+      // Generate official 10% fee Invoice & Folio receipt and process 90% refund
+      const cancResult = await StorageService.processCancellationAndArchive(booking, cancellationReason || 'Guest requested cancellation');
+      const fee10 = cancResult ? cancResult.fee10Percent : Number(((booking.paidAmount || booking.totalAmount || 0) * 0.10).toFixed(2));
+      const refund90 = cancResult ? cancResult.refund90Percent : 0;
 
-      if (initialPaid > 0 && refund90Percent > 0) {
-        try {
-          await StorageService.createPayment({
-            bookingId: booking._id,
-            guestName: booking.guestName || 'Valued Patron',
-            roomNumber: booking.roomNumber || 'N/A',
-            amount: -refund90Percent,
-            paymentMethod: booking.paymentMethod || 'credit_card',
-            status: 'completed',
-            notes: `90% Refund issued on cancellation (10% fee retained: Rs. ${fee10Percent.toFixed(2)})`,
-            recordedBy: `${req.user?.name || 'Staff'} (${req.user?.role || 'Staff'})`,
-          });
-        } catch (payErr) {
-          console.error('Error creating refund payment record:', payErr);
-        }
-
-        updatePayload.paidAmount = fee10Percent;
-        updatePayload.totalAmount = fee10Percent;
-        updatePayload.paymentStatus = 'refunded';
-      }
+      updatePayload.paidAmount = fee10;
+      updatePayload.totalAmount = fee10 > 0 ? fee10 : Number(booking.totalAmount || 0);
+      updatePayload.paymentStatus = refund90 > 0 ? 'refunded' : (fee10 > 0 ? 'paid' : 'pending');
     }
 
     const updated = await StorageService.updateBooking(id, updatePayload);
