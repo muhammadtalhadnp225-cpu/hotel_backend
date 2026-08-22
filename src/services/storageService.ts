@@ -880,12 +880,13 @@ export class StorageService {
       if (filter.guestId) query.guest = filter.guestId;
       if (filter.roomId) query.$or = [{ room: filter.roomId }, { roomId: filter.roomId }];
 
-      const activeBookings = await (Booking as any).find(query).populate('guest').populate('room').sort({ createdAt: -1 }).exec();
+      const rawBookings = await (Booking as any).find(query).populate('guest').populate('room').sort({ createdAt: -1 }).lean().exec();
+      const activeBookings: any[] = Array.isArray(rawBookings) ? [...rawBookings] : [];
 
       // In Billing Ledger, ensure ALL preserved invoices/folios are included so financial history is never lost
       if (filter.isBillingLedger || filter.includeArchived) {
         try {
-          const invoices = await (Invoice as any).find({}).sort({ issuedAt: -1 }).exec();
+          const invoices = await (Invoice as any).find({}).sort({ issuedAt: -1 }).lean().exec();
           const existingBookingNums = new Set(activeBookings.map((b: any) => String(b.bookingNumber || b._id)));
 
           for (const inv of invoices) {
