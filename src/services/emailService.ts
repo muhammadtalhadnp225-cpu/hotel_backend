@@ -834,43 +834,7 @@ ${hotelName}
     const from = options.from || `"${hotelName}" <${senderEmail}>`;
     const replyTo = options.replyTo || ENV.HOTEL_EMAIL || senderEmail;
 
-    // 1. Check if Resend HTTPS API Key is provided (Port 443 HTTPS - 100% reliable on Cloud/Render)
-    if (ENV.RESEND_API_KEY && ENV.RESEND_API_KEY.trim().length > 0) {
-      try {
-        const resendFrom = `"${hotelName}" <onboarding@resend.dev>`;
-        const response = await fetch('https://api.resend.com/emails', {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${ENV.RESEND_API_KEY.trim()}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            from: resendFrom,
-            to: [options.to],
-            reply_to: replyTo,
-            subject: options.subject,
-            html: options.html,
-            text: options.text,
-          }),
-        });
-
-        const data: any = await response.json();
-        if (response.ok && data.id) {
-          console.log(`[EmailService] ✉ Email dispatched via Resend HTTPS API to [${options.to}]. Subject: "${options.subject}". (ID: ${data.id})`);
-          return {
-            success: true,
-            messageId: data.id,
-            provider: 'resend_https',
-          };
-        } else {
-          console.warn(`[EmailService] Resend HTTPS API returned error:`, data);
-        }
-      } catch (resendErr: any) {
-        console.warn(`[EmailService] Resend dispatch attempt warning: ${resendErr.message}.`);
-      }
-    }
-
-    // 2. Check if Brevo (Sendinblue) HTTPS API Key is provided (Port 443 HTTPS)
+    // 1. Check if Brevo (Sendinblue) HTTPS API Key is provided (Port 443 HTTPS - Delivers to ANY recipient!)
     if (ENV.BREVO_API_KEY && ENV.BREVO_API_KEY.trim().length > 0) {
       try {
         const response = await fetch('https://api.brevo.com/v3/smtp/email', {
@@ -903,6 +867,42 @@ ${hotelName}
         }
       } catch (brevoErr: any) {
         console.warn(`[EmailService] Brevo dispatch attempt warning: ${brevoErr.message}.`);
+      }
+    }
+
+    // 2. Check if Resend HTTPS API Key is provided (Port 443 HTTPS)
+    if (ENV.RESEND_API_KEY && ENV.RESEND_API_KEY.trim().length > 0) {
+      try {
+        const resendFrom = `"${hotelName}" <onboarding@resend.dev>`;
+        const response = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${ENV.RESEND_API_KEY.trim()}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: resendFrom,
+            to: [options.to],
+            reply_to: replyTo,
+            subject: options.subject,
+            html: options.html,
+            text: options.text,
+          }),
+        });
+
+        const data: any = await response.json();
+        if (response.ok && data.id) {
+          console.log(`[EmailService] ✉ Email dispatched via Resend HTTPS API to [${options.to}]. Subject: "${options.subject}". (ID: ${data.id})`);
+          return {
+            success: true,
+            messageId: data.id,
+            provider: 'resend_https',
+          };
+        } else {
+          console.warn(`[EmailService] Resend HTTPS API returned error:`, data);
+        }
+      } catch (resendErr: any) {
+        console.warn(`[EmailService] Resend dispatch attempt warning: ${resendErr.message}.`);
       }
     }
 
