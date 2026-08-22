@@ -34,23 +34,23 @@ export const createEmployee = async (req: AuthenticatedRequest, res: Response, n
   try {
     const { name, email, phone, department, position, joiningDate, shift, salary, emergencyContact, address, notes, password } = req.body;
 
-    if (!name || !email || !phone || !department || !position || salary === undefined) {
+    if (!name || !email || !phone || !department || !position) {
       res.status(400).json({
         success: false,
-        message: 'Name, email, phone, department, position, and salary are required.',
+        message: 'Name, email, phone, department, and position are required.',
       });
       return;
     }
 
     const newEmp = await StorageService.createEmployee({
-      name,
-      email,
-      phone,
+      name: name.trim(),
+      email: email.trim(),
+      phone: phone.trim(),
       department,
-      position,
-      joiningDate,
-      shift,
-      salary: Number(salary),
+      position: position.trim(),
+      joiningDate: joiningDate || new Date().toISOString().split('T')[0],
+      shift: shift || 'Morning (07:00 - 15:00)',
+      salary: Number(salary || 0),
       emergencyContact,
       address,
       notes,
