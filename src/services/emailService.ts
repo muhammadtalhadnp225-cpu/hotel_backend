@@ -866,7 +866,43 @@ ${hotelName}
           console.warn(`[EmailService] Resend HTTPS API returned error:`, data);
         }
       } catch (resendErr: any) {
-        console.warn(`[EmailService] Resend dispatch attempt warning: ${resendErr.message}. Falling back to SMTP...`);
+        console.warn(`[EmailService] Resend dispatch attempt warning: ${resendErr.message}.`);
+      }
+    }
+
+    // 2. Check if Brevo (Sendinblue) HTTPS API Key is provided (Port 443 HTTPS)
+    if (ENV.BREVO_API_KEY && ENV.BREVO_API_KEY.trim().length > 0) {
+      try {
+        const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+          method: 'POST',
+          headers: {
+            'api-key': ENV.BREVO_API_KEY.trim(),
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+          body: JSON.stringify({
+            sender: { name: hotelName, email: senderEmail },
+            to: [{ email: options.to }],
+            replyTo: { email: replyTo },
+            subject: options.subject,
+            htmlContent: options.html,
+            textContent: options.text,
+          }),
+        });
+
+        const data: any = await response.json();
+        if (response.ok && data.messageId) {
+          console.log(`[EmailService] ✉ Email dispatched via Brevo HTTPS API to [${options.to}]. Subject: "${options.subject}". (ID: ${data.messageId})`);
+          return {
+            success: true,
+            messageId: data.messageId,
+            provider: 'brevo_https',
+          };
+        } else {
+          console.warn(`[EmailService] Brevo HTTPS API returned error:`, data);
+        }
+      } catch (brevoErr: any) {
+        console.warn(`[EmailService] Brevo dispatch attempt warning: ${brevoErr.message}.`);
       }
     }
 

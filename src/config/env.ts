@@ -22,6 +22,9 @@ export const ENV = {
   SMTP_USER: process.env.SMTP_USER || 't02407446@gmail.com',
   SMTP_PASS: process.env.SMTP_PASS || 'jehgflviihzqgssl',
   RESEND_API_KEY: process.env.RESEND_API_KEY || '',
+  BREVO_API_KEY: process.env.BREVO_API_KEY || '',
+  SENDGRID_API_KEY: process.env.SENDGRID_API_KEY || '',
 };
+
 
 
