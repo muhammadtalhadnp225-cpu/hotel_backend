@@ -221,7 +221,41 @@ export class ReportsService {
       .reduce((sum: number, f: any) => sum + Math.max(0, Number(f.balance || (f.totalCharges - (f.totalPayments || 0)) || 0)), 0);
 
     // 7-day timeline trends for Revenue, Expense, and Profit
+    // Build a map of dateStr -> revenue using ONE canonical date per booking
+    // to exactly match the Billing & Folios total without double-counting.
     const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    // Build a lookup: dateStr -> total paidAmount for that day
+    const revenueByDay: Record<string, number> = {};
+    // Use ALL billing-ledger bookings (not range-filtered) for the trend,
+    // then restrict to the last 7 days.
+    const sevenDaysAgo = new Date(Date.now() - 6 * 86400000);
+    sevenDaysAgo.setHours(0, 0, 0, 0);
+
+    for (const b of bookings) {
+      if (!b || !Number(b.paidAmount)) continue;
+      // Canonical date: checkOutDate for checked_out, updatedAt for cancelled, else createdAt
+      let canonicalDate: string | undefined;
+      try {
+        if (b.status === 'checked_out' && b.checkOutDate) {
+          canonicalDate = new Date(b.checkOutDate).toISOString().split('T')[0];
+        } else if (b.status === 'cancelled' && b.updatedAt) {
+          canonicalDate = new Date(b.updatedAt).toISOString().split('T')[0];
+        } else if (b.createdAt) {
+          canonicalDate = new Date(b.createdAt).toISOString().split('T')[0];
+        } else if (b.checkInDate) {
+          canonicalDate = new Date(b.checkInDate).toISOString().split('T')[0];
+        }
+      } catch {
+        continue;
+      }
+      if (!canonicalDate) continue;
+      // Only keep dates within last 7 days
+      if (new Date(canonicalDate) >= sevenDaysAgo) {
+        revenueByDay[canonicalDate] = (revenueByDay[canonicalDate] || 0) + Number(b.paidAmount);
+      }
+    }
+
     const financialTrends: Array<{
       date: string;
       fullDate: string;
@@ -236,39 +270,7 @@ export class ReportsService {
       const dateStr = d.toISOString().split('T')[0];
       const dayLabel = `${dayNames[d.getDay()]} (${d.getMonth() + 1}/${d.getDate()})`;
 
-      // Day payments
-      const dayPayments = payments.filter((p: any) => {
-        if (!p) return false;
-        try {
-          const pDate = new Date(p.createdAt || p.paymentDate).toISOString().split('T')[0];
-          return pDate === dateStr && p.status === 'completed';
-        } catch {
-          return false;
-        }
-      });
-
-      // Day bookings
-      const dayBookings = filteredBookings.filter((b: any) => {
-        if (!b) return false;
-        try {
-          const bCreateDate = b.createdAt ? new Date(b.createdAt).toISOString().split('T')[0] : '';
-          const bCheckInDate = b.checkInDate ? new Date(b.checkInDate).toISOString().split('T')[0] : '';
-          const bCheckOutDate = b.checkOutDate ? new Date(b.checkOutDate).toISOString().split('T')[0] : '';
-          const bUpdatedDate = b.updatedAt ? new Date(b.updatedAt).toISOString().split('T')[0] : '';
-          return (
-            bCreateDate === dateStr ||
-            bCheckInDate === dateStr ||
-            bCheckOutDate === dateStr ||
-            bUpdatedDate === dateStr
-          );
-        } catch {
-          return false;
-        }
-      });
-
-      const dayPaymentsRev = dayPayments.reduce((s: number, p: any) => s + (p.amount || 0), 0);
-      const dayBookingRev = dayBookings.reduce((s: number, b: any) => s + (Number(b.paidAmount) || 0), 0);
-      let dayRev = dayPaymentsRev > 0 ? dayPaymentsRev : dayBookingRev;
+      const dayRev = revenueByDay[dateStr] || 0;
 
       // Day expenses
       const dayExpenses = expenses.filter((e: any) => {
@@ -280,10 +282,7 @@ export class ReportsService {
           return false;
         }
       });
-      let dayExp = dayExpenses.reduce((s: number, e: any) => s + (e.amount || 0), 0);
-      if (dayExp === 0 && i === 0 && totalExpensesSum > 0 && expenses.length === 0) {
-        dayExp = totalExpensesSum;
-      }
+      const dayExp = dayExpenses.reduce((s: number, e: any) => s + (e.amount || 0), 0);
 
       const dayProfit = dayRev - dayExp;
 
@@ -297,16 +296,14 @@ export class ReportsService {
       });
     }
 
-    // Ensure 7-day revenue trend sums to exact totalRevenue
-    const totalTrendRev = financialTrends.reduce((s, t) => s + t.revenue, 0);
-    if (totalRevenue > 0 && totalTrendRev !== totalRevenue && financialTrends.length > 0) {
-      const diff = totalRevenue - totalTrendRev;
-      financialTrends[financialTrends.length - 1].revenue = Math.max(
-        0,
-        financialTrends[financialTrends.length - 1].revenue + diff
-      );
-      financialTrends[financialTrends.length - 1].profit =
-        financialTrends[financialTrends.length - 1].revenue - financialTrends[financialTrends.length - 1].expense;
+    // Reconcile: if 7-day visible total doesn't match billing-ledger totalRevenue,
+    // add the residual (bookings outside 7-day window) to today's bar.
+    const trendSum = financialTrends.reduce((s, t) => s + t.revenue, 0);
+    const residual = Math.round((totalRevenue - trendSum) * 100) / 100;
+    if (residual !== 0 && financialTrends.length > 0) {
+      const last = financialTrends[financialTrends.length - 1];
+      last.revenue = Math.max(0, last.revenue + residual);
+      last.profit = last.revenue - last.expense;
     }
 
     const financialReport = {
