@@ -886,7 +886,7 @@ export class StorageService {
       // In Billing Ledger, ensure ALL preserved invoices/folios are included so financial history is never lost
       if (filter.isBillingLedger || filter.includeArchived) {
         try {
-          const invoices = await (Invoice as any).find({}).sort({ issuedAt: -1 }).lean().exec();
+          const invoices = await (Invoice as any).find({ isDeleted: { $ne: true } }).sort({ issuedAt: -1 }).lean().exec();
           const existingBookingNums = new Set(activeBookings.map((b: any) => String(b.bookingNumber || b.reservationNumber || b._id)));
 
           for (const inv of invoices) {
@@ -1451,16 +1451,26 @@ export class StorageService {
     await this.ensureReady();
     if (!idOrRef) return;
 
+    const cleanRef = String(idOrRef).replace(/^INV-/, '').replace(/^FOL-/, '').trim();
+    const isOid1 = mongoose.isValidObjectId(idOrRef);
+    const isOid2 = mongoose.isValidObjectId(cleanRef);
+
     if (isMongo()) {
-      const isOid = mongoose.isValidObjectId(idOrRef);
       const orClauses: any[] = [
         { bookingNumber: idOrRef },
+        { bookingNumber: cleanRef },
         { invoiceNumber: idOrRef },
+        { invoiceNumber: cleanRef },
         { invoiceNumber: `INV-${idOrRef}` },
+        { invoiceNumber: `INV-${cleanRef}` },
       ];
-      if (isOid) {
+      if (isOid1) {
         orClauses.push({ _id: new mongoose.Types.ObjectId(idOrRef) });
         orClauses.push({ reservation: new mongoose.Types.ObjectId(idOrRef) });
+      }
+      if (isOid2) {
+        orClauses.push({ _id: new mongoose.Types.ObjectId(cleanRef) });
+        orClauses.push({ reservation: new mongoose.Types.ObjectId(cleanRef) });
       }
 
       await (Invoice as any).deleteMany({ $or: orClauses }).exec();
@@ -1468,37 +1478,58 @@ export class StorageService {
 
       const bookingOrClauses: any[] = [
         { bookingNumber: idOrRef },
+        { bookingNumber: cleanRef },
         { reservationNumber: idOrRef },
+        { reservationNumber: cleanRef },
       ];
-      if (isOid) {
+      if (isOid1) {
         bookingOrClauses.push({ _id: new mongoose.Types.ObjectId(idOrRef) });
       }
-      await (Booking as any).updateMany(
-        { $or: bookingOrClauses },
-        { $set: { isDeleted: true, isPurgedFromBilling: true } }
-      ).exec();
+      if (isOid2) {
+        bookingOrClauses.push({ _id: new mongoose.Types.ObjectId(cleanRef) });
+      }
+
+      // Hard delete booking so it is completely removed from database and revenue counts
+      await (Booking as any).deleteMany({ $or: bookingOrClauses }).exec();
+
+      const paymentOrClauses: any[] = [];
+      if (isOid1) paymentOrClauses.push({ bookingId: new mongoose.Types.ObjectId(idOrRef) });
+      if (isOid2) paymentOrClauses.push({ bookingId: new mongoose.Types.ObjectId(cleanRef) });
+      if (paymentOrClauses.length > 0) {
+        await (Payment as any).deleteMany({ $or: paymentOrClauses }).exec();
+      }
     } else {
       InMemoryStore.invoices = (InMemoryStore.invoices || []).filter(
         (inv) =>
           String(inv._id) !== String(idOrRef) &&
+          String(inv._id) !== String(cleanRef) &&
           String(inv.bookingNumber) !== String(idOrRef) &&
-          String(inv.invoiceNumber) !== String(idOrRef)
+          String(inv.bookingNumber) !== String(cleanRef) &&
+          String(inv.invoiceNumber) !== String(idOrRef) &&
+          String(inv.invoiceNumber) !== String(cleanRef) &&
+          String(inv.invoiceNumber) !== `INV-${cleanRef}`
       );
       InMemoryStore.folios = (InMemoryStore.folios || []).filter(
         (f) =>
           String(f._id) !== String(idOrRef) &&
-          String(f.bookingNumber) !== String(idOrRef)
+          String(f._id) !== String(cleanRef) &&
+          String(f.bookingNumber) !== String(idOrRef) &&
+          String(f.bookingNumber) !== String(cleanRef)
       );
-      const bIdx = InMemoryStore.bookings.findIndex(
+      InMemoryStore.bookings = (InMemoryStore.bookings || []).filter(
         (b) =>
-          String(b._id) === String(idOrRef) ||
-          String(b.bookingNumber) === String(idOrRef) ||
-          String(b.reservationNumber) === String(idOrRef)
+          String(b._id) !== String(idOrRef) &&
+          String(b._id) !== String(cleanRef) &&
+          String(b.bookingNumber) !== String(idOrRef) &&
+          String(b.bookingNumber) !== String(cleanRef) &&
+          String(b.reservationNumber) !== String(idOrRef) &&
+          String(b.reservationNumber) !== String(cleanRef)
       );
-      if (bIdx !== -1) {
-        InMemoryStore.bookings[bIdx].isDeleted = true;
-        InMemoryStore.bookings[bIdx].isPurgedFromBilling = true;
-      }
+      InMemoryStore.payments = (InMemoryStore.payments || []).filter(
+        (p) =>
+          String(p.bookingId) !== String(idOrRef) &&
+          String(p.bookingId) !== String(cleanRef)
+      );
     }
   }
 
