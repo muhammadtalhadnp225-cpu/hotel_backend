@@ -137,13 +137,11 @@ export class ReportsService {
     const checkOuts = filteredBookings.filter((b: any) => b.status === 'checked_out');
     const cancellations = filteredBookings.filter((b: any) => b.status === 'cancelled');
 
-    // Room revenue from paid/confirmed bookings
-    const roomRevenueTotal = filteredBookings
-      .filter((b: any) => b.status !== 'cancelled')
-      .reduce(
-        (sum: number, b: any) => sum + Number(b.paidAmount ?? (b.paymentStatus === 'paid' ? b.totalAmount : b.paidAmount || b.totalAmount || 0)),
-        0
-      );
+    // Room revenue from collected booking payments & settled fees
+    const roomRevenueTotal = filteredBookings.reduce(
+      (sum: number, b: any) => sum + (Number(b.paidAmount) || 0),
+      0
+    );
 
     const adr = checkIns.length > 0 ? roomRevenueTotal / checkIns.length : (totalRooms > 0 ? roomRevenueTotal / totalRooms : 0);
     const revPar = totalRooms > 0 ? roomRevenueTotal / totalRooms : 0;
