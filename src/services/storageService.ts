@@ -1375,21 +1375,58 @@ export class StorageService {
     const booking = await this.getBookingById(id);
     if (!booking) return null;
 
-    // Process 10% fee retention and generate official Invoice/Folio receipt
-    const result = await this.processCancellationAndArchive(booking, booking.cancellationReason || 'Deleted by staff');
-    const fee10 = result ? result.fee10Percent : 0;
-    const refund90 = result ? result.refund90Percent : 0;
+    // 0. Checked-In Guard: Guest who is checked in cannot delete reservation
+    if (booking.status === 'checked_in') {
+      const err = new Error(
+        'Cannot delete an active in-house reservation. The guest is currently checked in. Please perform check-out first.'
+      );
+      (err as any).statusCode = 400;
+      throw err;
+    }
 
-    // Soft-delete the reservation from active list while preserving invoice in billing
-    const updatePayload = {
-      isDeleted: true,
-      status: 'cancelled',
-      paidAmount: fee10,
-      totalAmount: fee10 > 0 ? fee10 : Number(booking.totalAmount || 0),
-      paymentStatus: refund90 > 0 ? 'refunded' : (fee10 > 0 ? 'paid' : 'pending'),
-      cancelledAt: new Date(),
-      cancellationReason: booking.cancellationReason || 'Deleted by staff (10% fee retained, invoice preserved)',
-    };
+    let updatePayload: any;
+
+    if (booking.status === 'checked_out') {
+      // 1. Post-Checkout Deletion: The stay was completed and guest checked out.
+      // Retain 100% full complete invoiced amount (0% refunded/deducted).
+      updatePayload = {
+        isDeleted: true,
+        status: 'checked_out',
+        totalAmount: booking.totalAmount,
+        paidAmount: booking.paidAmount,
+        paymentStatus: booking.paymentStatus || 'paid',
+        cancellationReason: 'Archived after completed stay and checkout (100% Full Revenue Retained)',
+      };
+
+      // Ensure the completed stay invoice & folio in database remain 100% intact and preserved
+      const invNum = `INV-${booking.bookingNumber || booking.reservationNumber}`;
+      if (isMongo()) {
+        await (Invoice as any).updateOne(
+          { $or: [{ bookingNumber: booking.bookingNumber }, { reservation: booking._id }, { invoiceNumber: invNum }] },
+          { $set: { isArchived: true, isDeleted: false } }
+        ).exec();
+        await (Folio as any).updateOne(
+          { $or: [{ reservation: booking._id }, { bookingNumber: booking.bookingNumber }] },
+          { $set: { isArchived: true, isDeleted: false } }
+        ).exec();
+      }
+    } else {
+      // 2. Pre-Check-in Deletion: Guest did not check in.
+      // Retain 10% cancellation fee and refund 90% of advance deposit.
+      const result = await this.processCancellationAndArchive(booking, booking.cancellationReason || 'Deleted by staff before check-in');
+      const fee10 = result ? result.fee10Percent : 0;
+      const refund90 = result ? result.refund90Percent : 0;
+
+      updatePayload = {
+        isDeleted: true,
+        status: 'cancelled',
+        paidAmount: fee10,
+        totalAmount: fee10 > 0 ? fee10 : Number(booking.totalAmount || 0),
+        paymentStatus: refund90 > 0 ? 'refunded' : (fee10 > 0 ? 'paid' : 'pending'),
+        cancelledAt: new Date(),
+        cancellationReason: booking.cancellationReason || 'Deleted before check-in (10% fee retained, 90% refunded)',
+      };
+    }
 
     if (isMongo()) {
       const updated = await (Booking as any).findByIdAndUpdate(
