@@ -36,6 +36,7 @@ export interface IGuest extends Document {
   totalVisits: number;
   totalSpent: number;
   lastVisit?: Date;
+  isDeleted?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -149,6 +150,11 @@ const GuestSchema: Schema<IGuest> = new Schema(
     lastVisit: {
       type: Date,
       default: Date.now,
+    },
+    isDeleted: {
+      type: Boolean,
+      default: false,
+      index: true,
     },
   },
   {

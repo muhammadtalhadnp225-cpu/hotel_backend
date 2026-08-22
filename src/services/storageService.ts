@@ -853,13 +853,16 @@ export class StorageService {
     await this.ensureReady();
     if (isMongo()) {
       const query: any = {};
+      if (!filter.includeDeleted) {
+        query.isDeleted = { $ne: true };
+      }
       if (filter.status && filter.status !== 'all') query.status = filter.status.toLowerCase();
       if (filter.paymentStatus && filter.paymentStatus !== 'all') query.paymentStatus = filter.paymentStatus.toLowerCase();
       if (filter.guestId) query.guest = filter.guestId;
       if (filter.roomId) query.$or = [{ room: filter.roomId }, { roomId: filter.roomId }];
       const activeBookings = await (Booking as any).find(query).populate('guest').populate('room').sort({ createdAt: -1 }).exec();
 
-      // Include all preserved historical/deleted guest Invoices in Billing Ledger so receipts are NEVER lost
+      // Include all preserved historical/deleted guest Invoices in Billing Ledger so receipts and folios are NEVER lost
       if (!filter.roomId && (!filter.status || filter.status === 'all')) {
         try {
           const invoices = await (Invoice as any).find({}).sort({ issuedAt: -1 }).exec();
@@ -902,8 +905,9 @@ export class StorageService {
       return activeBookings;
     }
 
-    return InMemoryStore.bookings
+    const bookingsList = InMemoryStore.bookings
       .filter((b) => {
+        if (!filter.includeDeleted && b.isDeleted) return false;
         if (filter.status && filter.status !== 'all' && b.status.toLowerCase() !== filter.status.toLowerCase())
           return false;
         if (
@@ -917,6 +921,42 @@ export class StorageService {
         return true;
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    // Also include preserved historical invoices in InMemoryStore if ledger query
+    if (!filter.roomId && (!filter.status || filter.status === 'all')) {
+      const existingBookingNums = new Set(bookingsList.map((b) => String(b.bookingNumber || b._id)));
+      for (const inv of InMemoryStore.invoices || []) {
+        const num = String(inv.bookingNumber || inv.invoiceNumber?.replace('INV-', ''));
+        if (!existingBookingNums.has(num)) {
+          existingBookingNums.add(num);
+          bookingsList.push({
+            _id: inv._id,
+            bookingNumber: num,
+            reservationNumber: num,
+            guestName: inv.guestName || 'Valued Patron',
+            guestPhone: inv.guestPhone || '',
+            guestEmail: inv.guestEmail || '',
+            roomNumber: inv.roomNumber || 'N/A',
+            roomType: inv.roomType || 'Suite',
+            checkInDate: inv.checkInDate || inv.issuedAt,
+            checkOutDate: inv.checkOutDate || inv.issuedAt,
+            totalNights: inv.totalNights || 1,
+            pricePerNight: (inv.totalAmount || 0) / Math.max(1, inv.totalNights || 1),
+            subtotal: inv.subtotal || inv.totalAmount || 0,
+            tax: inv.tax || 0,
+            totalAmount: inv.totalAmount || 0,
+            paidAmount: inv.paidAmount || (inv.status === 'paid' ? inv.totalAmount : 0),
+            paymentStatus: inv.status === 'paid' ? 'paid' : (inv.paidAmount > 0 ? 'partially_paid' : 'pending'),
+            status: 'settled',
+            isArchivedReceipt: true,
+            createdAt: inv.issuedAt || inv.createdAt || new Date(),
+            updatedAt: inv.updatedAt || new Date(),
+          });
+        }
+      }
+    }
+
+    return bookingsList;
   }
 
   static async getBookingById(id: string) {
@@ -1147,6 +1187,20 @@ export class StorageService {
 
     // 1. Permanently Archive the Folio Receipt & Invoice in the database so it is NEVER lost
     try {
+      // Ensure the folio is generated and preserved with full snapshots
+      const folio: any = await this.createOrGetFolioForBooking(id);
+      if (folio && isMongo()) {
+        await (Folio as any).findByIdAndUpdate(folio._id, {
+          isArchived: true,
+          guestName: booking.guestName || booking.guest?.fullName || 'Valued Patron',
+          guestEmail: booking.guestEmail || booking.guest?.email || '',
+          guestPhone: booking.guestPhone || booking.guest?.phone || '',
+          bookingNumber: booking.bookingNumber || booking.reservationNumber,
+          roomNumber: booking.roomNumber || booking.room?.roomNumber || 'N/A',
+          roomType: booking.roomType || booking.room?.type || 'Suite',
+        }).exec();
+      }
+
       if (isMongo()) {
         const invNum = `INV-${booking.bookingNumber || Math.floor(10000 + Math.random() * 90000)}`;
         const existingInvoice = await (Invoice as any).findOne({
@@ -1160,7 +1214,7 @@ export class StorageService {
         if (!existingInvoice) {
           await (Invoice as any).create({
             invoiceNumber: invNum,
-            bookingNumber: booking.bookingNumber,
+            bookingNumber: booking.bookingNumber || booking.reservationNumber,
             reservation: booking._id,
             guest: booking.guest?._id || booking.guest || new mongoose.Types.ObjectId(),
             guestName: booking.guestName || booking.guest?.fullName || 'Valued Patron',
@@ -1183,7 +1237,7 @@ export class StorageService {
             paidAmount: booking.paidAmount || (booking.paymentStatus === 'paid' ? booking.totalAmount : 0),
             balance: Math.max(0, (booking.totalAmount || 0) - (booking.paidAmount || 0)),
             paymentMethod: booking.paymentMethod || 'credit_card',
-            paymentReceiptNumber: `REC-${booking.bookingNumber}`,
+            paymentReceiptNumber: `REC-${booking.bookingNumber || booking.reservationNumber}`,
             status: booking.paymentStatus === 'paid' ? 'paid' : (booking.paidAmount > 0 ? 'partially_paid' : 'pending'),
             issuedAt: booking.createdAt || new Date(),
             items: [
@@ -1195,7 +1249,43 @@ export class StorageService {
                 amount: booking.totalAmount || 0,
               },
             ],
-            notes: `Preserved Folio Receipt for ${booking.guestName}. Reservation Ref: ${booking.bookingNumber}.`,
+            notes: `Preserved Folio Receipt for ${booking.guestName}. Reservation Ref: ${booking.bookingNumber || booking.reservationNumber}.`,
+          });
+        }
+      } else {
+        // InMemory archive
+        InMemoryStore.invoices = InMemoryStore.invoices || [];
+        const invNum = `INV-${booking.bookingNumber || booking.reservationNumber || Math.floor(10000 + Math.random() * 90000)}`;
+        const exists = InMemoryStore.invoices.some((i) => i.bookingNumber === (booking.bookingNumber || booking.reservationNumber));
+        if (!exists) {
+          InMemoryStore.invoices.push({
+            _id: new mongoose.Types.ObjectId().toString(),
+            invoiceNumber: invNum,
+            bookingNumber: booking.bookingNumber || booking.reservationNumber,
+            reservation: booking._id,
+            guest: booking.guest,
+            guestName: booking.guestName || 'Valued Patron',
+            guestEmail: booking.guestEmail || '',
+            guestPhone: booking.guestPhone || '',
+            roomNumber: booking.roomNumber || 'N/A',
+            roomType: booking.roomType || 'Suite',
+            checkInDate: booking.checkInDate || new Date(),
+            checkOutDate: booking.checkOutDate || new Date(),
+            totalNights: booking.totalNights || 1,
+            roomCharges: booking.subtotal || booking.totalAmount || 0,
+            additionalServicesCharges: 0,
+            restaurantCharges: 0,
+            otherCharges: 0,
+            subtotal: booking.subtotal || booking.totalAmount || 0,
+            discount: booking.discount || 0,
+            tax: booking.tax || 0,
+            taxRate: 8,
+            totalAmount: booking.totalAmount || 0,
+            paidAmount: booking.paidAmount || 0,
+            balance: Math.max(0, (booking.totalAmount || 0) - (booking.paidAmount || 0)),
+            paymentMethod: booking.paymentMethod || 'credit_card',
+            status: booking.paymentStatus === 'paid' ? 'paid' : 'pending',
+            issuedAt: booking.createdAt || new Date(),
           });
         }
       }
@@ -1203,30 +1293,41 @@ export class StorageService {
       console.error('Failed to auto-archive invoice on booking deletion:', invErr);
     }
 
+    // 2. Soft-delete the reservation (mark as deleted & cancelled) so Folio & Billing records keep their referential integrity
     if (isMongo()) {
-      const deleted = await (Booking as any).findByIdAndDelete(id).exec();
-      if (booking.roomId) {
-        const room = await (Room as any).findById(booking.roomId);
+      const updated = await (Booking as any).findByIdAndUpdate(
+        id,
+        { isDeleted: true, status: 'cancelled', cancelledAt: new Date() },
+        { new: true }
+      ).exec();
+
+      const rId = booking.roomId || (booking.room?._id || booking.room);
+      if (rId) {
+        const room = await (Room as any).findById(rId);
         if (room && (room.status === 'reserved' || room.status === 'occupied')) {
           room.status = 'available';
           room.currentBookingId = null;
           await room.save();
         }
       }
-      return deleted;
+      return updated;
     }
 
     const index = InMemoryStore.bookings.findIndex((b) => b._id === id);
     if (index === -1) return null;
-    const [deleted] = InMemoryStore.bookings.splice(index, 1);
-    if (booking.roomId) {
-      const room = InMemoryStore.rooms.find((r) => r._id === booking.roomId);
+    InMemoryStore.bookings[index].isDeleted = true;
+    InMemoryStore.bookings[index].status = 'cancelled';
+    InMemoryStore.bookings[index].cancelledAt = new Date();
+
+    const rId = booking.roomId || (booking.room?._id || booking.room);
+    if (rId) {
+      const room = InMemoryStore.rooms.find((r) => r._id === rId);
       if (room && (room.status === 'reserved' || room.status === 'occupied')) {
         room.status = 'available';
         room.currentBookingId = null;
       }
     }
-    return deleted;
+    return InMemoryStore.bookings[index];
   }
 
   // ================= GUESTS =================
@@ -1234,34 +1335,29 @@ export class StorageService {
     await this.ensureReady();
     let guests: any[] = [];
     if (isMongo()) {
+      const query: any = { isDeleted: { $ne: true } };
       if (search && search.trim()) {
         const regex = new RegExp(search.trim(), 'i');
-        guests = await (Guest as any)
-          .find({
-            $or: [
-              { fullName: regex },
-              { email: regex },
-              { phone: regex },
-              { idNumber: regex },
-              { nationality: regex },
-            ],
-          })
-          .sort({ updatedAt: -1 })
-          .exec();
-      } else {
-        guests = await (Guest as any).find().sort({ updatedAt: -1 }).exec();
+        query.$or = [
+          { fullName: regex },
+          { email: regex },
+          { phone: regex },
+          { idNumber: regex },
+          { nationality: regex },
+        ];
       }
+      guests = await (Guest as any).find(query).sort({ updatedAt: -1 }).exec();
       return guests;
     }
 
-    guests = InMemoryStore.guests;
+    guests = InMemoryStore.guests.filter((g) => !g.isDeleted);
     if (search && search.trim()) {
       const q = search.toLowerCase().trim();
       guests = guests.filter(
         (g) =>
-          g.fullName.toLowerCase().includes(q) ||
+          (g.fullName && g.fullName.toLowerCase().includes(q)) ||
           (g.email && g.email.toLowerCase().includes(q)) ||
-          g.phone.includes(q) ||
+          (g.phone && g.phone.includes(q)) ||
           (g.idNumber && g.idNumber.toLowerCase().includes(q)) ||
           (g.nationality && g.nationality.toLowerCase().includes(q))
       );
@@ -1522,20 +1618,56 @@ export class StorageService {
     await this.ensureReady();
     // Check if guest has active checked_in reservations
     const bookings = await this.getAllBookings({ guestId: id });
-    const hasActiveStay = bookings.some((b: any) => ['checked_in', 'confirmed'].includes(b.status));
+    const hasActiveStay = bookings.some((b: any) => !b.isDeleted && ['checked_in', 'confirmed'].includes(b.status));
     if (hasActiveStay) {
       const err = new Error('Cannot delete guest with active or confirmed reservations.');
       (err as any).statusCode = 400;
       throw err;
     }
 
+    const guest = await this.getGuestById(id);
+
+    // Ensure all existing Folios and Invoices for this guest have full snapshots preserved
+    if (guest) {
+      try {
+        if (isMongo()) {
+          await (Folio as any).updateMany(
+            { guest: guest._id },
+            {
+              $set: {
+                guestName: guest.fullName || 'Valued Patron',
+                guestEmail: guest.email || '',
+                guestPhone: guest.phone || '',
+                guestAddress: guest.address || '',
+              },
+            }
+          ).exec();
+          await (Invoice as any).updateMany(
+            { guest: guest._id },
+            {
+              $set: {
+                guestName: guest.fullName || 'Valued Patron',
+                guestEmail: guest.email || '',
+                guestPhone: guest.phone || '',
+                guestAddress: guest.address || '',
+              },
+            }
+          ).exec();
+        }
+      } catch (err) {
+        console.warn('Snapshotting folios/invoices on guest soft-delete warning:', err);
+      }
+    }
+
+    // Soft-delete the guest so all historical Folios, Invoices, and Billing records remain intact
     if (isMongo()) {
-      return await (Guest as any).findByIdAndDelete(id).exec();
+      return await (Guest as any).findByIdAndUpdate(id, { isDeleted: true }, { new: true }).exec();
     }
 
     const index = InMemoryStore.guests.findIndex((g) => g._id === id);
     if (index === -1) return null;
-    return InMemoryStore.guests.splice(index, 1)[0];
+    InMemoryStore.guests[index].isDeleted = true;
+    return InMemoryStore.guests[index];
   }
 
   static async getGuestHistory(guestId: string) {
@@ -1723,9 +1855,15 @@ export class StorageService {
       const newFolio = new Folio({
         folioNumber,
         guest: booking.guest?._id || booking.guest,
+        guestName: booking.guestName || booking.guest?.fullName || 'Valued Patron',
+        guestEmail: booking.guestEmail || booking.guest?.email || '',
+        guestPhone: booking.guestPhone || booking.guest?.phone || '',
+        guestAddress: booking.guestAddress || booking.guest?.address || '',
         reservation: booking._id,
         bookingNumber: booking.bookingNumber || booking.reservationNumber,
         room: booking.room?._id || booking.room || booking.roomId,
+        roomNumber: booking.roomNumber || booking.room?.roomNumber || 'N/A',
+        roomType: booking.roomType || booking.room?.type || 'Suite',
         items: [
           {
             description: `Room Accommodation - ${booking.roomNumber ? `Room ${booking.roomNumber}` : 'Stay'} (${nights} Nights @ ${rate}/night)`,
@@ -1768,11 +1906,15 @@ export class StorageService {
       _id: folioId,
       folioNumber,
       guest: booking.guest || booking.guestId,
-      guestName: booking.guestName,
+      guestName: booking.guestName || booking.guest?.fullName || 'Valued Patron',
+      guestEmail: booking.guestEmail || booking.guest?.email || '',
+      guestPhone: booking.guestPhone || booking.guest?.phone || '',
+      guestAddress: booking.guestAddress || booking.guest?.address || '',
       reservation: booking._id,
       bookingNumber: booking.bookingNumber || booking.reservationNumber,
       room: booking.room || booking.roomId,
-      roomNumber: booking.roomNumber,
+      roomNumber: booking.roomNumber || booking.room?.roomNumber || 'N/A',
+      roomType: booking.roomType || booking.room?.type || 'Suite',
       items: [
         {
           _id: new mongoose.Types.ObjectId().toString(),
@@ -4149,7 +4291,13 @@ export class StorageService {
   static async getAllFolios() {
     await this.ensureReady();
     if (isMongo()) {
-      return await (Folio as any).find().sort({ createdAt: -1 }).exec();
+      return await (Folio as any)
+        .find()
+        .populate('guest')
+        .populate('room')
+        .populate('reservation')
+        .sort({ createdAt: -1 })
+        .exec();
     }
     return InMemoryStore.folios || [];
   }

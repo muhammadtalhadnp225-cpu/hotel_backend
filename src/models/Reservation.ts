@@ -59,6 +59,7 @@ export interface IReservation extends Document {
   assignedStaffId?: mongoose.Types.ObjectId;
   cancelledAt?: Date;
   cancellationReason?: string;
+  isDeleted?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -247,6 +248,11 @@ const ReservationSchema: Schema<IReservation> = new Schema(
     cancellationReason: {
       type: String,
       trim: true,
+    },
+    isDeleted: {
+      type: Boolean,
+      default: false,
+      index: true,
     },
   },
   {

@@ -30,14 +30,23 @@ export interface IFolioItem {
 
 export interface IFolio extends Document {
   folioNumber: string; // e.g. 'FOL-2026-10492'
-  guest: mongoose.Types.ObjectId;
-  reservation: mongoose.Types.ObjectId;
+  guest?: mongoose.Types.ObjectId;
+  guestName?: string;
+  guestEmail?: string;
+  guestPhone?: string;
+  guestAddress?: string;
+  reservation?: mongoose.Types.ObjectId;
+  bookingNumber?: string;
   room?: mongoose.Types.ObjectId;
+  roomNumber?: string;
+  roomType?: string;
   items: IFolioItem[];
   totalCharges: number;
   totalPayments: number;
   balance: number;
   status: FolioStatus;
+  isArchived?: boolean;
+  isDeleted?: boolean;
   closedAt?: Date;
   settledBy?: mongoose.Types.ObjectId;
   notes?: string;
@@ -115,18 +124,52 @@ const FolioSchema: Schema<IFolio> = new Schema(
     guest: {
       type: Schema.Types.ObjectId,
       ref: 'Guest',
-      required: [true, 'Guest reference is required'],
       index: true,
+    },
+    guestName: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    guestEmail: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    guestPhone: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    guestAddress: {
+      type: String,
+      trim: true,
+      default: '',
     },
     reservation: {
       type: Schema.Types.ObjectId,
       ref: 'Reservation',
-      required: [true, 'Reservation reference is required'],
+      index: true,
+    },
+    bookingNumber: {
+      type: String,
+      trim: true,
+      default: '',
     },
     room: {
       type: Schema.Types.ObjectId,
       ref: 'Room',
       index: true,
+    },
+    roomNumber: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    roomType: {
+      type: String,
+      trim: true,
+      default: '',
     },
     items: {
       type: [FolioItemSchema],
@@ -150,6 +193,16 @@ const FolioSchema: Schema<IFolio> = new Schema(
       type: String,
       enum: ['open', 'closed', 'settled', 'void'],
       default: 'open',
+    },
+    isArchived: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    isDeleted: {
+      type: Boolean,
+      default: false,
+      index: true,
     },
     closedAt: {
       type: Date,
