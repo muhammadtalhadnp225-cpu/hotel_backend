@@ -867,7 +867,7 @@ export class StorageService {
       
       if (filter.status === 'deleted' || filter.status === 'archived') {
         query.isDeleted = true;
-      } else if (!filter.includeDeleted) {
+      } else if (!filter.includeDeleted && !filter.isBillingLedger) {
         query.isDeleted = { $ne: true };
       }
 
@@ -887,7 +887,7 @@ export class StorageService {
       if (filter.isBillingLedger || filter.includeArchived) {
         try {
           const invoices = await (Invoice as any).find({}).sort({ issuedAt: -1 }).lean().exec();
-          const existingBookingNums = new Set(activeBookings.map((b: any) => String(b.bookingNumber || b._id)));
+          const existingBookingNums = new Set(activeBookings.map((b: any) => String(b.bookingNumber || b.reservationNumber || b._id)));
 
           for (const inv of invoices) {
             const num = String(inv.bookingNumber || inv.invoiceNumber?.replace('INV-', ''));
@@ -931,7 +931,7 @@ export class StorageService {
         if (filter.status === 'deleted' || filter.status === 'archived') {
           return b.isDeleted === true;
         }
-        if (!filter.includeDeleted && b.isDeleted) return false;
+        if (!filter.includeDeleted && !filter.isBillingLedger && b.isDeleted) return false;
         if (
           filter.status &&
           filter.status !== 'all' &&
