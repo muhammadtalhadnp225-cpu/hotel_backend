@@ -2548,10 +2548,11 @@ export class StorageService {
       notes: payload.notes ? (booking.notes ? `${booking.notes} | ${payload.notes}` : payload.notes) : booking.notes,
     });
 
-    // 8. Update Room Status to CLEANING & Create Housekeeping task
+    // 8. Update Room Status directly to AVAILABLE upon Checkout
     if (room) {
       await this.updateRoom(String(room._id), {
-        status: 'cleaning',
+        status: 'available',
+        cleaningStatus: 'CLEAN',
         currentBookingId: null,
         currentGuestId: null,
         lastCleaned: new Date(),

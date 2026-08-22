@@ -502,7 +502,7 @@ export const updateBookingStatus = async (
       if (normalizedStatus === 'checked_in') {
         await StorageService.updateRoom(targetRoomId, { status: 'occupied' });
       } else if (normalizedStatus === 'checked_out') {
-        await StorageService.updateRoom(targetRoomId, { status: 'cleaning' });
+        await StorageService.updateRoom(targetRoomId, { status: 'available', cleaningStatus: 'CLEAN', currentBookingId: null });
       } else if (normalizedStatus === 'cancelled' || normalizedStatus === 'no_show') {
         await StorageService.updateRoom(targetRoomId, { status: 'available', currentBookingId: null });
       }
