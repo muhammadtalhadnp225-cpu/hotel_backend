@@ -131,6 +131,10 @@ export class EmailService {
    * Dispatches automated VIP welcome email upon new user / patron account creation
    */
   static async sendWelcomeEmail(user: any): Promise<EmailSendResult> {
+    // ── Transactional emails are currently disabled ──────────────────────────
+    console.log('[EmailService] sendWelcomeEmail: transactional emails disabled — skipping.');
+    return { success: false, mock: true, error: 'Transactional emails disabled' };
+    // ────────────────────────────────────────────────────────────────────────
     const rawUser = user && typeof user.toObject === 'function' ? user.toObject() : (user || {});
     const toEmail = rawUser.email || rawUser.guestEmail || rawUser.data?.email || rawUser.username;
 
@@ -332,6 +336,10 @@ ${hotelName}
     responseMessage: string,
     respondedBy: string = 'The Chief Concierge'
   ): Promise<EmailSendResult> {
+    // ── Transactional emails are currently disabled ──────────────────────────
+    console.log('[EmailService] sendInquiryReplyToGuest: transactional emails disabled — skipping.');
+    return { success: false, mock: true, error: 'Transactional emails disabled' };
+    // ────────────────────────────────────────────────────────────────────────
     const rawInquiry = inquiry && typeof inquiry.toObject === 'function' ? inquiry.toObject() : (inquiry || {});
     const toEmail = rawInquiry.email;
 
@@ -444,6 +452,10 @@ Email: ${ENV.HOTEL_EMAIL}
    * Dispatches instant acknowledgement email to guest when contact inquiry is submitted on website
    */
   static async sendContactInquiryConfirmation(inquiry: any): Promise<EmailSendResult> {
+    // ── Transactional emails are currently disabled ──────────────────────────
+    console.log('[EmailService] sendContactInquiryConfirmation: transactional emails disabled — skipping.');
+    return { success: false, mock: true, error: 'Transactional emails disabled' };
+    // ────────────────────────────────────────────────────────────────────────
     const rawInquiry = inquiry && typeof inquiry.toObject === 'function' ? inquiry.toObject() : (inquiry || {});
     const toEmail = rawInquiry.email;
 
@@ -524,6 +536,10 @@ Email: ${ENV.HOTEL_EMAIL}
    * Dispatches automated, luxury reservation confirmation email with stay details, total persons, total stay days & total bill
    */
   static async sendBookingConfirmationEmail(booking: any, recipientEmail?: string): Promise<EmailSendResult> {
+    // ── Transactional emails are currently disabled ──────────────────────────
+    console.log('[EmailService] sendBookingConfirmationEmail: transactional emails disabled — skipping.');
+    return { success: false, mock: true, error: 'Transactional emails disabled' };
+    // ────────────────────────────────────────────────────────────────────────
     const rawBooking = booking && typeof booking.toObject === 'function' ? booking.toObject() : (booking || {});
     const toEmail = recipientEmail || rawBooking.guestEmail || rawBooking.email || rawBooking.guest?.email;
 
