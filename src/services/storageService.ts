@@ -1447,6 +1447,61 @@ export class StorageService {
     return InMemoryStore.bookings[index];
   }
 
+  static async deleteBillingRecord(idOrRef: string) {
+    await this.ensureReady();
+    if (!idOrRef) return;
+
+    if (isMongo()) {
+      const isOid = mongoose.isValidObjectId(idOrRef);
+      const orClauses: any[] = [
+        { bookingNumber: idOrRef },
+        { invoiceNumber: idOrRef },
+        { invoiceNumber: `INV-${idOrRef}` },
+      ];
+      if (isOid) {
+        orClauses.push({ _id: new mongoose.Types.ObjectId(idOrRef) });
+        orClauses.push({ reservation: new mongoose.Types.ObjectId(idOrRef) });
+      }
+
+      await (Invoice as any).deleteMany({ $or: orClauses }).exec();
+      await (Folio as any).deleteMany({ $or: orClauses }).exec();
+
+      const bookingOrClauses: any[] = [
+        { bookingNumber: idOrRef },
+        { reservationNumber: idOrRef },
+      ];
+      if (isOid) {
+        bookingOrClauses.push({ _id: new mongoose.Types.ObjectId(idOrRef) });
+      }
+      await (Booking as any).updateMany(
+        { $or: bookingOrClauses },
+        { $set: { isDeleted: true, isPurgedFromBilling: true } }
+      ).exec();
+    } else {
+      InMemoryStore.invoices = (InMemoryStore.invoices || []).filter(
+        (inv) =>
+          String(inv._id) !== String(idOrRef) &&
+          String(inv.bookingNumber) !== String(idOrRef) &&
+          String(inv.invoiceNumber) !== String(idOrRef)
+      );
+      InMemoryStore.folios = (InMemoryStore.folios || []).filter(
+        (f) =>
+          String(f._id) !== String(idOrRef) &&
+          String(f.bookingNumber) !== String(idOrRef)
+      );
+      const bIdx = InMemoryStore.bookings.findIndex(
+        (b) =>
+          String(b._id) === String(idOrRef) ||
+          String(b.bookingNumber) === String(idOrRef) ||
+          String(b.reservationNumber) === String(idOrRef)
+      );
+      if (bIdx !== -1) {
+        InMemoryStore.bookings[bIdx].isDeleted = true;
+        InMemoryStore.bookings[bIdx].isPurgedFromBilling = true;
+      }
+    }
+  }
+
   // ================= GUESTS =================
   static async getAllGuests(search?: string) {
     await this.ensureReady();
@@ -2547,17 +2602,16 @@ export class StorageService {
       .filter((i) => ['damage', 'other'].includes(i.category))
       .reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
 
-    const grossCharges = roomCharges + additionalServicesCharges + restaurantCharges + otherCharges;
-    const discount = Number(payload.discount ?? booking.discount ?? 0);
-    const taxableSubtotal = Math.max(0, grossCharges - discount);
-    const taxRate = 10; // 10% standard hotel tax
-    const tax = Math.round(taxableSubtotal * (taxRate / 100) * 100) / 100;
-    const finalTotalAmount = taxableSubtotal + tax;
+    const finalTotalAmount = (folioItems && folioItems.length > 0)
+      ? (taxableSubtotal + tax)
+      : Number(booking.totalAmount || taxableSubtotal || 0);
 
     const previousPayments = Number(booking.paidAmount || 0);
     const initialDue = Math.max(0, finalTotalAmount - previousPayments);
-    const settlementPaid = payload.settlementAmount !== undefined ? Number(payload.settlementAmount) : initialDue;
-    const totalPayments = previousPayments + settlementPaid;
+    const settlementPaid = payload.settlementAmount !== undefined
+      ? Math.min(initialDue, Number(payload.settlementAmount))
+      : initialDue;
+    const totalPayments = Math.min(finalTotalAmount, previousPayments + settlementPaid);
     const finalBalance = Math.max(0, finalTotalAmount - totalPayments);
 
     // 4. Record Settlement Payment

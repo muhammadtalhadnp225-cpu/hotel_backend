@@ -599,6 +599,26 @@ export const deleteBooking = async (
 ): Promise<void> => {
   try {
     const { id } = req.params;
+    const { purgeFromBilling } = req.query;
+
+    if (purgeFromBilling === 'true' || purgeFromBilling === true) {
+      await StorageService.deleteBillingRecord(id);
+      await StorageService.logAction({
+        userName: req.user?.name || 'Admin',
+        userRole: req.user?.role || 'admin',
+        module: 'billing',
+        action: 'INVOICE_RECORD_DELETED',
+        details: `Deleted billing/invoice ledger entry ${id}.`,
+        ipAddress: req.ip,
+      });
+
+      res.status(200).json({
+        success: true,
+        message: 'Invoice and billing record deleted successfully',
+      });
+      return;
+    }
+
     const booking = await StorageService.getBookingById(id);
     if (!booking) {
       res.status(404).json({ success: false, message: 'Reservation not found' });
