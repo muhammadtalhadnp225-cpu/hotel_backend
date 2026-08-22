@@ -61,8 +61,34 @@ export const purgeDummyData = async (req: Request, res: Response, next: NextFunc
 export const verifyEmailSystem = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { EmailService } = await import('../services/emailService.js');
+    const { ENV } = await import('../config/env.js');
+    
+    if (ENV.RESEND_API_KEY && ENV.RESEND_API_KEY.trim().length > 0) {
+      res.status(200).json({
+        success: true,
+        activeProvider: 'Resend HTTPS API (Port 443)',
+        message: 'Resend HTTPS API is configured and ready for live cloud delivery.',
+      });
+      return;
+    }
+
+    if (ENV.BREVO_API_KEY && ENV.BREVO_API_KEY.trim().length > 0) {
+      res.status(200).json({
+        success: true,
+        activeProvider: 'Brevo HTTPS API (Port 443)',
+        message: 'Brevo HTTPS API is configured and ready for live cloud delivery.',
+      });
+      return;
+    }
+
     const result = await EmailService.verifyTransporter();
-    res.status(result.success ? 200 : 500).json(result);
+    res.status(result.success ? 200 : 500).json({
+      ...result,
+      activeProvider: 'Nodemailer SMTP (Ports 465/587)',
+      cloudNotice: result.success
+        ? 'SMTP is operating normally.'
+        : 'Render cloud firewall blocks raw SMTP ports 465/587. Add RESEND_API_KEY or BREVO_API_KEY in Render Environment Variables for 100% reliable HTTPS delivery.',
+    });
   } catch (error: any) {
     res.status(500).json({ success: false, message: 'SMTP verification failed', error: error.message });
   }
@@ -71,21 +97,25 @@ export const verifyEmailSystem = async (req: Request, res: Response, next: NextF
 export const testEmailSystem = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { EmailService } = await import('../services/emailService.js');
-    const targetEmail = req.body?.to || req.query?.to || req.query?.email;
+    const { ENV } = await import('../config/env.js');
+    const targetEmail = req.body?.to || req.query?.to || req.query?.email || ENV.HOTEL_EMAIL;
     const result = await EmailService.sendTestEmail(typeof targetEmail === 'string' ? targetEmail : undefined);
     
     if (result.success) {
       res.status(200).json({
         success: true,
         message: 'Diagnostic test email dispatched successfully',
+        provider: result.provider,
         messageId: result.messageId,
-        recipient: targetEmail || 'Default Administrator Email',
+        recipient: targetEmail,
       });
     } else {
       res.status(500).json({
         success: false,
         message: 'Failed to send test email',
+        provider: result.provider,
         error: result.error,
+        help: 'If running on Render, raw SMTP ports 465/587 are blocked. Add RESEND_API_KEY (from resend.com) in Render Dashboard -> Environment Variables.',
       });
     }
   } catch (error: any) {
