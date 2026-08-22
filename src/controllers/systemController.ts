@@ -57,3 +57,39 @@ export const purgeDummyData = async (req: Request, res: Response, next: NextFunc
     next(error);
   }
 };
+
+export const verifyEmailSystem = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { EmailService } = await import('../services/emailService.js');
+    const result = await EmailService.verifyTransporter();
+    res.status(result.success ? 200 : 500).json(result);
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'SMTP verification failed', error: error.message });
+  }
+};
+
+export const testEmailSystem = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { EmailService } = await import('../services/emailService.js');
+    const targetEmail = req.body?.to || req.query?.to || req.query?.email;
+    const result = await EmailService.sendTestEmail(typeof targetEmail === 'string' ? targetEmail : undefined);
+    
+    if (result.success) {
+      res.status(200).json({
+        success: true,
+        message: 'Diagnostic test email dispatched successfully',
+        messageId: result.messageId,
+        recipient: targetEmail || 'Default Administrator Email',
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        message: 'Failed to send test email',
+        error: result.error,
+      });
+    }
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Test email failed', error: error.message });
+  }
+};
+

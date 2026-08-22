@@ -13,34 +13,77 @@ export class EmailService {
   private static transporter: Transporter | null = null;
 
   /**
+   * Clears the cached transporter instance (useful on connection errors or config updates)
+   */
+  public static resetTransporter(): void {
+    if (this.transporter) {
+      try {
+        this.transporter.close();
+      } catch (_) {
+        // ignore close error
+      }
+      this.transporter = null;
+    }
+  }
+
+  /**
    * Initializes or returns the cached Nodemailer SMTP transporter
    */
-  private static getTransporter(): Transporter {
+  public static getTransporter(): Transporter {
     if (this.transporter) {
       return this.transporter;
     }
 
-    const host = ENV.SMTP_HOST;
-    const port = ENV.SMTP_PORT;
-    const secure = ENV.SMTP_SECURE;
-    const user = ENV.SMTP_USER || ENV.HOTEL_EMAIL;
-    const pass = ENV.SMTP_PASS;
+    const host = (ENV.SMTP_HOST || 'smtp.gmail.com').trim();
+    const port = Number(ENV.SMTP_PORT) || 587;
+    const user = (ENV.SMTP_USER || ENV.HOTEL_EMAIL || 't02407446@gmail.com').trim();
+    const pass = (ENV.SMTP_PASS || '').trim();
+    const isGmail = host.toLowerCase().includes('gmail') || user.toLowerCase().endsWith('@gmail.com');
 
-    if (pass && pass.trim().length > 0) {
-      // Production / Live SMTP Transporter (e.g. Gmail App Password)
-      this.transporter = nodemailer.createTransport({
-        host,
-        port,
-        secure,
-        auth: {
-          user,
-          pass,
-        },
-        tls: {
-          rejectUnauthorized: false,
-        },
-      });
-      console.log(`[EmailService] Initialized SMTP Transporter for [${user}] on ${host}:${port}`);
+    if (pass && pass.length > 0) {
+      if (isGmail) {
+        // High-reliability Gmail Transporter with Connection Pooling & explicit SSL
+        this.transporter = nodemailer.createTransport({
+          service: 'gmail',
+          auth: {
+            user,
+            pass,
+          },
+          pool: true,
+          maxConnections: 5,
+          maxMessages: 100,
+          rateLimit: 14,
+          connectionTimeout: 15000,
+          greetingTimeout: 15000,
+          socketTimeout: 30000,
+          tls: {
+            rejectUnauthorized: false,
+          },
+        });
+        console.log(`[EmailService] Initialized high-reliability Gmail SMTP Pool for [${user}]`);
+      } else {
+        // Generic Custom SMTP Transporter
+        const secure = port === 465 || ENV.SMTP_SECURE === true;
+        this.transporter = nodemailer.createTransport({
+          host,
+          port,
+          secure,
+          auth: {
+            user,
+            pass,
+          },
+          pool: true,
+          maxConnections: 5,
+          maxMessages: 100,
+          connectionTimeout: 15000,
+          greetingTimeout: 15000,
+          socketTimeout: 30000,
+          tls: {
+            rejectUnauthorized: false,
+          },
+        });
+        console.log(`[EmailService] Initialized SMTP Transporter for [${user}] on ${host}:${port} (secure: ${secure})`);
+      }
     } else {
       // Development / Fallback mode: Logs email to console & simulates instant delivery
       this.transporter = nodemailer.createTransport({
@@ -49,7 +92,7 @@ export class EmailService {
         buffer: true,
       });
       console.log(
-        `[EmailService] Notice: SMTP_PASS not set. Running in Stream Mode. Real emails will dispatch as soon as SMTP_PASS (Gmail App Password) is provided in backend/.env.`
+        `[EmailService] Notice: SMTP_PASS not set. Running in Stream Mode. Real emails will dispatch as soon as SMTP_PASS is provided in backend/.env.`
       );
     }
 
@@ -57,22 +100,53 @@ export class EmailService {
   }
 
   /**
+   * Verifies SMTP connection health and returns status
+   */
+  public static async verifyTransporter(): Promise<{ success: boolean; message: string; error?: string }> {
+    try {
+      const transporter = this.getTransporter();
+      await transporter.verify();
+      const user = ENV.SMTP_USER || ENV.HOTEL_EMAIL || 't02407446@gmail.com';
+      console.log(`[EmailService] ✅ SMTP Transporter verified and connected successfully for [${user}]`);
+      return {
+        success: true,
+        message: `SMTP Transporter verified successfully for [${user}].`,
+      };
+    } catch (error: any) {
+      console.error('[EmailService] ❌ SMTP Verification Failed:', error.message);
+      return {
+        success: false,
+        message: 'SMTP Verification Failed',
+        error: error.message,
+      };
+    }
+  }
+
+  /**
    * Dispatches automated VIP welcome email upon new user / patron account creation
    */
   static async sendWelcomeEmail(user: any): Promise<EmailSendResult> {
-    const toEmail = user.email;
-    const hotelName = ENV.HOTEL_NAME;
+    const rawUser = user && typeof user.toObject === 'function' ? user.toObject() : (user || {});
+    const toEmail = rawUser.email || rawUser.guestEmail || rawUser.data?.email || rawUser.username;
+
+    if (!toEmail) {
+      console.warn('[EmailService] Skipped welcome email: No recipient email specified.');
+      return { success: false, error: 'No recipient email found' };
+    }
+
+    const hotelName = ENV.HOTEL_NAME || 'Aethelgard Resort & Sanctuary';
     const portalUrl = ENV.WEBSITE_URL || 'https://hotel-website-pi-five.vercel.app';
-    const guestTitle = user.title ? `${user.title} ` : '';
-    const guestName = user.firstName 
-      ? `${guestTitle}${user.firstName} ${user.lastName || ''}`.trim()
-      : (user.name || 'Esteemed Patron');
-    
-    const rawId = (user.id || user._id || '').toString();
+    const guestTitle = rawUser.title ? `${rawUser.title} ` : '';
+    const guestName = rawUser.firstName
+      ? `${guestTitle}${rawUser.firstName} ${rawUser.lastName || ''}`.trim()
+      : (rawUser.name || rawUser.fullName || 'Esteemed Patron');
+
+    const rawId = (rawUser.id || rawUser._id || '').toString();
     const memberCode = rawId.length >= 6 ? rawId.slice(-6).toUpperCase() : (rawId ? rawId.toUpperCase() : 'VIP');
     const memberId = `AETH-${memberCode}`;
-    const membershipTier = user.membershipTier || 'Patron Circle VIP';
-    const fromAddress = `"${hotelName} Patron Desk" <${ENV.HOTEL_EMAIL}>`;
+    const membershipTier = rawUser.membershipTier || 'Patron Circle VIP';
+    const senderEmail = ENV.SMTP_USER || ENV.HOTEL_EMAIL || 't02407446@gmail.com';
+    const fromAddress = `"${hotelName} Patron Desk" <${senderEmail}>`;
 
     const htmlContent = `
 <!DOCTYPE html>
@@ -253,12 +327,20 @@ ${hotelName}
     responseMessage: string,
     respondedBy: string = 'The Chief Concierge'
   ): Promise<EmailSendResult> {
-    const toEmail = inquiry.email;
-    const guestName = inquiry.name || 'Esteemed Patron';
-    const ticketId = inquiry.ticketId || 'INQ-REF';
-    const subjectTitle = inquiry.subject || 'Website Inquiry';
-    const hotelName = ENV.HOTEL_NAME;
-    const fromAddress = `"${hotelName} Concierge" <${ENV.HOTEL_EMAIL}>`;
+    const rawInquiry = inquiry && typeof inquiry.toObject === 'function' ? inquiry.toObject() : (inquiry || {});
+    const toEmail = rawInquiry.email;
+
+    if (!toEmail) {
+      console.warn('[EmailService] Skipped inquiry reply: No recipient email specified.');
+      return { success: false, error: 'No recipient email found' };
+    }
+
+    const guestName = rawInquiry.name || 'Esteemed Patron';
+    const ticketId = rawInquiry.ticketId || 'INQ-REF';
+    const subjectTitle = rawInquiry.subject || 'Website Inquiry';
+    const hotelName = ENV.HOTEL_NAME || 'Aethelgard Resort & Sanctuary';
+    const senderEmail = ENV.SMTP_USER || ENV.HOTEL_EMAIL || 't02407446@gmail.com';
+    const fromAddress = `"${hotelName} Concierge" <${senderEmail}>`;
 
     const htmlContent = `
 <!DOCTYPE html>
@@ -301,9 +383,9 @@ ${hotelName}
       <div class="original-summary">
         <div style="font-weight: bold; color: #DFBA73; margin-bottom: 8px; text-transform: uppercase; font-size: 10px; letter-spacing: 1px;">Your Original Inquiry Details:</div>
         <div><strong>Subject:</strong> ${subjectTitle}</div>
-        ${inquiry.travelDates ? `<div><strong>Travel Dates:</strong> ${inquiry.travelDates}</div>` : ''}
-        ${inquiry.phone ? `<div><strong>Phone:</strong> ${inquiry.phone}</div>` : ''}
-        <div style="margin-top: 6px;"><strong>Message:</strong> "${inquiry.message}"</div>
+        ${rawInquiry.travelDates ? `<div><strong>Travel Dates:</strong> ${rawInquiry.travelDates}</div>` : ''}
+        ${rawInquiry.phone ? `<div><strong>Phone:</strong> ${rawInquiry.phone}</div>` : ''}
+        <div style="margin-top: 6px;"><strong>Message:</strong> "${rawInquiry.message}"</div>
       </div>
 
       <div class="signature">
@@ -334,8 +416,8 @@ ${responseMessage}
 
 ---
 Your Original Message:
-"${inquiry.message}"
-${inquiry.travelDates ? `Travel Dates: ${inquiry.travelDates}` : ''}
+"${rawInquiry.message}"
+${rawInquiry.travelDates ? `Travel Dates: ${rawInquiry.travelDates}` : ''}
 
 With our highest regards,
 ${respondedBy}
@@ -357,12 +439,20 @@ Email: ${ENV.HOTEL_EMAIL}
    * Dispatches instant acknowledgement email to guest when contact inquiry is submitted on website
    */
   static async sendContactInquiryConfirmation(inquiry: any): Promise<EmailSendResult> {
-    const toEmail = inquiry.email;
-    const guestName = inquiry.name || 'Esteemed Patron';
-    const ticketId = inquiry.ticketId || 'INQ-REF';
-    const subjectTitle = inquiry.subject || 'General Sanctuary Inquiry';
-    const hotelName = ENV.HOTEL_NAME;
-    const fromAddress = `"${hotelName} Concierge" <${ENV.HOTEL_EMAIL}>`;
+    const rawInquiry = inquiry && typeof inquiry.toObject === 'function' ? inquiry.toObject() : (inquiry || {});
+    const toEmail = rawInquiry.email;
+
+    if (!toEmail) {
+      console.warn('[EmailService] Skipped contact inquiry confirmation: No recipient email specified.');
+      return { success: false, error: 'No recipient email found' };
+    }
+
+    const guestName = rawInquiry.name || 'Esteemed Patron';
+    const ticketId = rawInquiry.ticketId || 'INQ-REF';
+    const subjectTitle = rawInquiry.subject || 'General Sanctuary Inquiry';
+    const hotelName = ENV.HOTEL_NAME || 'Aethelgard Resort & Sanctuary';
+    const senderEmail = ENV.SMTP_USER || ENV.HOTEL_EMAIL || 't02407446@gmail.com';
+    const fromAddress = `"${hotelName} Concierge" <${senderEmail}>`;
 
     const htmlContent = `
 <!DOCTYPE html>
@@ -396,8 +486,8 @@ Email: ${ENV.HOTEL_EMAIL}
 
       <div class="details">
         <p style="margin: 0 0 8px 0;"><strong>Inquiry Subject:</strong> ${subjectTitle}</p>
-        ${inquiry.travelDates ? `<p style="margin: 0 0 8px 0;"><strong>Travel Dates:</strong> ${inquiry.travelDates}</p>` : ''}
-        <p style="margin: 0;"><strong>Your Message:</strong> "${inquiry.message}"</p>
+        ${rawInquiry.travelDates ? `<p style="margin: 0 0 8px 0;"><strong>Travel Dates:</strong> ${rawInquiry.travelDates}</p>` : ''}
+        <p style="margin: 0;"><strong>Your Message:</strong> "${rawInquiry.message}"</p>
       </div>
 
       <p>Our concierge liaison is reviewing your request and will respond directly to this email address shortly.</p>
@@ -429,7 +519,9 @@ Email: ${ENV.HOTEL_EMAIL}
    * Dispatches automated, luxury reservation confirmation email with stay details, total persons, total stay days & total bill
    */
   static async sendBookingConfirmationEmail(booking: any, recipientEmail?: string): Promise<EmailSendResult> {
-    const toEmail = recipientEmail || booking.guestEmail || booking.email;
+    const rawBooking = booking && typeof booking.toObject === 'function' ? booking.toObject() : (booking || {});
+    const toEmail = recipientEmail || rawBooking.guestEmail || rawBooking.email || rawBooking.guest?.email;
+
     if (!toEmail) {
       console.warn('[EmailService] Skipped booking confirmation email: No recipient email specified.');
       return { success: false, error: 'No recipient email found' };
@@ -437,43 +529,45 @@ Email: ${ENV.HOTEL_EMAIL}
 
     const hotelName = ENV.HOTEL_NAME || 'Aethelgard Luxury Sanctuary & Resort';
     const portalUrl = ENV.WEBSITE_URL || 'https://hotel-website-pi-five.vercel.app';
-    const guestName = booking.guestName || booking.name || 'Esteemed Patron';
-    const bookingRef = booking.bookingNumber || booking.reservationNumber || booking.referenceNumber || 'RES-CONFIRMED';
-    const roomName = booking.roomName || (booking.roomNumber ? `Suite ${booking.roomNumber}` : 'Luxury Sanctuary Suite');
-    const roomNumber = booking.roomNumber || 'Assigned on Arrival';
-    const roomCategory = booking.roomCategory || booking.roomType || 'Ultra-Luxury';
+    const guestName = rawBooking.guestName || rawBooking.name || rawBooking.guest?.name || rawBooking.guest?.fullName || 'Esteemed Patron';
+    const bookingRef = rawBooking.bookingNumber || rawBooking.reservationNumber || rawBooking.referenceNumber || 'RES-CONFIRMED';
+    const roomName = rawBooking.roomName || (rawBooking.roomNumber ? `Suite ${rawBooking.roomNumber}` : 'Luxury Sanctuary Suite');
+    const roomNumber = rawBooking.roomNumber || (rawBooking.room?.roomNumber ? String(rawBooking.room.roomNumber) : 'Assigned on Arrival');
+    const roomCategory = rawBooking.roomCategory || rawBooking.roomType || rawBooking.room?.category || 'Ultra-Luxury';
 
     // Dates & Duration Calculations
-    const checkInDate = new Date(booking.checkInDate || booking.checkIn);
-    const checkOutDate = new Date(booking.checkOutDate || booking.checkOut);
+    const checkInDate = new Date(rawBooking.checkInDate || rawBooking.checkIn);
+    const checkOutDate = new Date(rawBooking.checkOutDate || rawBooking.checkOut);
     const nights = Math.max(
       1,
-      Number(booking.totalNights) ||
-        Math.ceil(Math.abs(checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24))
+      Number(rawBooking.totalNights) ||
+        Math.ceil(Math.abs(checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24)) ||
+        1
     );
     const stayDays = nights + 1;
 
     const formattedCheckIn = !isNaN(checkInDate.getTime())
       ? checkInDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
-      : String(booking.checkInDate || 'Arrival Day');
+      : String(rawBooking.checkInDate || 'Arrival Day');
 
     const formattedCheckOut = !isNaN(checkOutDate.getTime())
       ? checkOutDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
-      : String(booking.checkOutDate || 'Departure Day');
+      : String(rawBooking.checkOutDate || 'Departure Day');
 
     // Total Persons
-    const adults = Number(booking.numberOfAdults || booking.numberOfGuests || 1);
-    const children = Number(booking.numberOfChildren || 0);
+    const adults = Number(rawBooking.numberOfAdults || rawBooking.numberOfGuests || 1);
+    const children = Number(rawBooking.numberOfChildren || 0);
     const totalPersons = adults + children;
     const personsText = children > 0 ? `${totalPersons} Persons (${adults} Adults, ${children} Children)` : `${adults} ${adults === 1 ? 'Person' : 'Persons'}`;
 
     // Financials
-    const totalBill = Number(booking.totalAmount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const paidAmount = Number(booking.paidAmount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const balanceDue = Math.max(0, Number(booking.totalAmount || 0) - Number(booking.paidAmount || 0)).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const paymentStatus = (booking.paymentStatus || 'pending').toUpperCase();
+    const totalBill = Number(rawBooking.totalAmount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const paidAmount = Number(rawBooking.paidAmount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const balanceDue = Math.max(0, Number(rawBooking.totalAmount || 0) - Number(rawBooking.paidAmount || 0)).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const paymentStatus = (rawBooking.paymentStatus || 'confirmed').toUpperCase();
 
-    const fromAddress = `"${hotelName} Reservations" <${ENV.HOTEL_EMAIL}>`;
+    const senderEmail = ENV.SMTP_USER || ENV.HOTEL_EMAIL || 't02407446@gmail.com';
+    const fromAddress = `"${hotelName} Reservations" <${senderEmail}>`;
 
     const htmlContent = `
 <!DOCTYPE html>
@@ -576,7 +670,7 @@ Email: ${ENV.HOTEL_EMAIL}
               <span class="bill-status">${paymentStatus}</span>
             </td>
             <td align="right" style="vertical-align: bottom;">
-              ${Number(paidAmount) > 0 ? `<div style="font-size: 12px; color: #34D399; margin-bottom: 3px;">Paid Deposit: $${paidAmount}</div>` : ''}
+              ${Number(rawBooking.paidAmount || 0) > 0 ? `<div style="font-size: 12px; color: #34D399; margin-bottom: 3px;">Paid Deposit: $${paidAmount}</div>` : ''}
               <div style="font-size: 12px; color: #A1A1AA;">Balance Due: <strong style="color: #FFFFFF;">$${balanceDue}</strong></div>
             </td>
           </tr>
@@ -673,7 +767,54 @@ ${hotelName}
   }
 
   /**
-   * Internal helper: Dispatches the email through Nodemailer
+   * Diagnostic test email dispatcher for administration and health verification
+   */
+  static async sendTestEmail(targetEmail?: string): Promise<EmailSendResult> {
+    const to = targetEmail || ENV.SMTP_USER || ENV.HOTEL_EMAIL || 't02407446@gmail.com';
+    const hotelName = ENV.HOTEL_NAME || 'Aethelgard Resort & Sanctuary';
+    const senderEmail = ENV.SMTP_USER || ENV.HOTEL_EMAIL || 't02407446@gmail.com';
+    const fromAddress = `"${hotelName} System Diagnostic" <${senderEmail}>`;
+    const timestamp = new Date().toUTCString();
+
+    const htmlContent = `
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { font-family: sans-serif; background: #09090b; color: #f4f4f5; padding: 20px; }
+    .card { max-width: 540px; margin: auto; background: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 24px; }
+    .badge { background: #059669; color: white; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 12px; }
+    h2 { color: #DFBA73; margin-top: 0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>⚡ Hotel ERP Mail System Operational Test</h2>
+    <p><span class="badge">DIAGNOSTIC PASSED</span></p>
+    <p>This automated diagnostic message confirms that the <strong>${hotelName}</strong> SMTP mail delivery system is functioning with full end-to-end delivery capability.</p>
+    <hr style="border-color: #27272a; margin: 18px 0;" />
+    <p style="font-size: 12px; color: #a1a1aa;">
+      <strong>Timestamp:</strong> ${timestamp}<br>
+      <strong>SMTP Host / Service:</strong> ${ENV.SMTP_HOST || 'smtp.gmail.com'}<br>
+      <strong>Sender Account:</strong> ${senderEmail}
+    </p>
+  </div>
+</body>
+</html>
+    `;
+
+    return await this.sendEmail({
+      to,
+      from: fromAddress,
+      replyTo: senderEmail,
+      subject: `[Diagnostic] ${hotelName} Email Delivery System Verification - ${new Date().toLocaleTimeString()}`,
+      html: htmlContent,
+      text: `Hotel ERP Mail System Diagnostic Test Passed.\nTimestamp: ${timestamp}\nSender: ${senderEmail}`,
+    });
+  }
+
+  /**
+   * Internal helper: Dispatches the email through Nodemailer with automatic retry on socket failure
    */
   static async sendEmail(options: {
     to: string;
@@ -683,11 +824,13 @@ ${hotelName}
     html: string;
     text?: string;
   }): Promise<EmailSendResult> {
+    const senderEmail = ENV.SMTP_USER || ENV.HOTEL_EMAIL || 't02407446@gmail.com';
+    const from = options.from || `"${ENV.HOTEL_NAME || 'Aethelgard'}" <${senderEmail}>`;
+    const replyTo = options.replyTo || ENV.HOTEL_EMAIL || senderEmail;
+
+    // Primary Attempt
     try {
       const transporter = this.getTransporter();
-      const from = options.from || `"${ENV.HOTEL_NAME}" <${ENV.HOTEL_EMAIL}>`;
-      const replyTo = options.replyTo || ENV.HOTEL_EMAIL;
-
       const info = await transporter.sendMail({
         from,
         to: options.to,
@@ -697,18 +840,42 @@ ${hotelName}
         text: options.text,
       });
 
-      console.log(`[EmailService] ✉ Email dispatched to [${options.to}]. Subject: "${options.subject}". From: [${from}]`);
+      console.log(`[EmailService] ✉ Email dispatched to [${options.to}]. Subject: "${options.subject}". From: [${from}] (ID: ${info.messageId})`);
       
       return {
         success: true,
         messageId: info.messageId,
       };
     } catch (error: any) {
-      console.error(`[EmailService] ❌ Failed to dispatch email to [${options.to}]:`, error.message);
-      return {
-        success: false,
-        error: error.message,
-      };
+      console.warn(`[EmailService] ⚠️ Primary dispatch attempt failed for [${options.to}]: ${error.message}. Retrying with reset transporter...`);
+      
+      // Secondary Attempt with fresh transporter reset
+      try {
+        this.resetTransporter();
+        const freshTransporter = this.getTransporter();
+        const retryInfo = await freshTransporter.sendMail({
+          from,
+          to: options.to,
+          replyTo,
+          subject: options.subject,
+          html: options.html,
+          text: options.text,
+        });
+
+        console.log(`[EmailService] ✉ Email retry succeeded for [${options.to}]. Subject: "${options.subject}". (ID: ${retryInfo.messageId})`);
+        return {
+          success: true,
+          messageId: retryInfo.messageId,
+        };
+      } catch (retryError: any) {
+        console.error(`[EmailService] ❌ Failed to dispatch email to [${options.to}]:`, retryError.message);
+        return {
+          success: false,
+          error: retryError.message,
+        };
+      }
     }
   }
 }
+
+export default EmailService;

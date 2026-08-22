@@ -318,7 +318,14 @@ export const createBooking = async (
     });
 
     // Automatically dispatch booking confirmation email with Total Bill, Total Persons & Total Stay Duration
-    const recipientEmail = guestEmail || booking.guestEmail || booking.email;
+    const recipientEmail =
+      guestEmail ||
+      guestObj?.email ||
+      req.body.email ||
+      booking.guestEmail ||
+      booking.email ||
+      (typeof booking.guest === 'object' ? booking.guest?.email : undefined);
+
     if (recipientEmail) {
       EmailService.sendBookingConfirmationEmail(booking, recipientEmail).catch((mailErr) => {
         console.error(`[BookingController] Booking confirmation email notice for [${recipientEmail}]:`, mailErr.message);
@@ -473,6 +480,16 @@ export const updateBookingStatus = async (
       details: `Updated reservation ${booking.bookingNumber || booking.reservationNumber} status to [${normalizedStatus.toUpperCase()}].`,
       ipAddress: req.ip,
     });
+
+    // If status became confirmed, send confirmation email
+    if (normalizedStatus === 'confirmed' && (booking.status !== 'confirmed' || req.body.sendConfirmationEmail === true)) {
+      const recipientEmail = guestEmail || updated?.guestEmail || updated?.email || booking.guestEmail || booking.email;
+      if (recipientEmail) {
+        EmailService.sendBookingConfirmationEmail(updated, recipientEmail).catch((mailErr) => {
+          console.error(`[BookingController] Booking status confirmation email notice for [${recipientEmail}]:`, mailErr.message);
+        });
+      }
+    }
 
     res.status(200).json({
       success: true,

@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { StorageService } from '../services/storageService.js';
 import { AuthService } from '../services/authService.js';
+import { EmailService } from '../services/emailService.js';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 
 export const getGuests = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -136,6 +137,20 @@ export const createGuest = async (
       details: `Created new guest profile for ${guest.fullName} (${guest.phone}) with ID ${guest.idType}: ${guest.idNumber || 'N/A'}.`,
       ipAddress: req.ip,
     });
+
+    // Send welcome email to guest if email is provided
+    if (email && email.trim()) {
+      EmailService.sendWelcomeEmail({
+        email: email.trim(),
+        name: fullName.trim(),
+        firstName: fullName.trim().split(' ')[0],
+        lastName: fullName.trim().split(' ').slice(1).join(' '),
+        phone: phone.trim(),
+        membershipTier: vipStatus ? 'Patron Circle VIP' : 'Patron Circle',
+      }).catch((emailErr) => {
+        console.warn('[GuestController] Welcome email notice for guest creation:', emailErr.message);
+      });
+    }
 
     res.status(201).json({
       success: true,

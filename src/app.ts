@@ -13,6 +13,7 @@ import { connectDatabase } from './config/db.js';
 import { seedDatabase, clearAllDummyData, dropExtraCollections } from './services/seedService.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { StorageService } from './services/storageService.js';
+import { EmailService } from './services/emailService.js';
 
 import authRoutes from './routes/authRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
@@ -150,6 +151,11 @@ export const initializeBackend = async () => {
     await connectDatabase();
     await seedDatabase(false);
     console.log('[Backend Init] Database connected and ready. No automatic guests seeded.');
+    
+    // Background SMTP connectivity check
+    EmailService.verifyTransporter().catch((mailErr) => {
+      console.warn('[Backend Init] SMTP Transporter background check warning:', mailErr.message);
+    });
   } catch (error: any) {
     console.error('[Backend Init] Warning during initialization:', error.message);
   }
