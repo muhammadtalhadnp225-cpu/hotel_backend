@@ -5,12 +5,15 @@ import { EmailService } from '../services/emailService.js';
 
 export const getBookings = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { status, paymentStatus, search, guestId, roomId } = req.query;
+    const { status, paymentStatus, search, guestId, roomId, isBillingLedger, includeArchived, includeDeleted } = req.query;
     let bookings = await StorageService.getAllBookings({
       status,
       paymentStatus,
       guestId: typeof guestId === 'string' ? guestId : undefined,
       roomId: typeof roomId === 'string' ? roomId : undefined,
+      isBillingLedger: isBillingLedger === 'true' || isBillingLedger === true,
+      includeArchived: includeArchived === 'true' || includeArchived === true,
+      includeDeleted: includeDeleted === 'true' || includeDeleted === true,
     });
 
     if (search && typeof search === 'string') {
@@ -41,7 +44,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
     let booking = await StorageService.getBookingById(id);
 
     if (!booking) {
-      const allBookings = await StorageService.getAllBookings();
+      const allBookings = await StorageService.getAllBookings({ isBillingLedger: true });
       const ref = (id || '').toLowerCase().trim();
       booking = allBookings.find(
         (b: any) =>
