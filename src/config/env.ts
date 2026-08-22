@@ -21,5 +21,7 @@ export const ENV = {
   SMTP_SECURE: process.env.SMTP_SECURE === 'true' || false,
   SMTP_USER: process.env.SMTP_USER || 't02407446@gmail.com',
   SMTP_PASS: process.env.SMTP_PASS || 'jehgflviihzqgssl',
+  RESEND_API_KEY: process.env.RESEND_API_KEY || '',
 };
+
 
