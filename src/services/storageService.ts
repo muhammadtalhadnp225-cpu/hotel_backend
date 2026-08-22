@@ -468,12 +468,13 @@ export class StorageService {
       if (isMongo()) {
         const activeBookings: any[] = await (Booking as any).find({
           status: { $in: ['checked_in', 'confirmed'] },
+          isDeleted: { $ne: true },
         }).exec();
 
-        // Get non-out-of-service/maintenance rooms
+        // Get rooms and synchronize statuses
         const rooms: any[] = await (Room as any).find().exec();
         for (const room of rooms) {
-          // If room is manually set to maintenance or cleaning, preserve unless overridden
+          // If room is manually set to maintenance or out_of_service, preserve
           if (room.status === 'maintenance' || room.status === 'out_of_service' || room.status === 'cleaning') {
             continue;
           }
@@ -487,26 +488,30 @@ export class StorageService {
             const checkOut = new Date(matchedBooking.checkOutDate);
 
             if (matchedBooking.status === 'checked_in') {
-              if (room.status !== 'occupied') {
+              if (room.status !== 'occupied' || String(room.currentBookingId) !== String(matchedBooking._id)) {
                 room.status = 'occupied';
                 room.currentBookingId = matchedBooking._id;
                 await room.save();
               }
             } else if (matchedBooking.status === 'confirmed') {
-              // If booking is today or upcoming active
-              if (now >= checkIn && now <= checkOut) {
-                if (room.status !== 'reserved' && room.status !== 'occupied') {
-                  room.status = 'reserved';
-                  room.currentBookingId = matchedBooking._id;
-                  await room.save();
-                }
+              if (room.status !== 'reserved' && room.status !== 'occupied') {
+                room.status = 'reserved';
+                room.currentBookingId = matchedBooking._id;
+                await room.save();
               }
+            }
+          } else {
+            // No active confirmed or checked_in booking found -> automatically free the room to available!
+            if (room.status === 'reserved' || room.status === 'occupied') {
+              room.status = 'available';
+              room.currentBookingId = null;
+              await room.save();
             }
           }
         }
       } else {
         const activeBookings = InMemoryStore.bookings.filter((b) =>
-          ['checked_in', 'confirmed'].includes(b.status)
+          !b.isDeleted && ['checked_in', 'confirmed'].includes(b.status)
         );
 
         for (const room of InMemoryStore.rooms) {
@@ -521,12 +526,14 @@ export class StorageService {
               room.status = 'occupied';
               room.currentBookingId = matched._id;
             } else if (matched.status === 'confirmed') {
-              const checkIn = new Date(matched.checkInDate);
-              const checkOut = new Date(matched.checkOutDate);
-              if (now >= checkIn && now <= checkOut) {
-                room.status = 'reserved';
-                room.currentBookingId = matched._id;
-              }
+              room.status = 'reserved';
+              room.currentBookingId = matched._id;
+            }
+          } else {
+            // Automatically free the room
+            if (room.status === 'reserved' || room.status === 'occupied') {
+              room.status = 'available';
+              room.currentBookingId = null;
             }
           }
         }

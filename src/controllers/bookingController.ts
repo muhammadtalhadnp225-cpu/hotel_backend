@@ -469,8 +469,11 @@ export const updateBookingStatus = async (
         await StorageService.updateRoom(targetRoomId, { status: 'occupied' });
       } else if (normalizedStatus === 'checked_out') {
         await StorageService.updateRoom(targetRoomId, { status: 'cleaning' });
+      } else if (normalizedStatus === 'cancelled' || normalizedStatus === 'no_show') {
+        await StorageService.updateRoom(targetRoomId, { status: 'available', currentBookingId: null });
       }
     }
+    await StorageService.syncRoomStatusesWithBookings();
 
     await StorageService.logAction({
       userName: req.user?.name || 'Staff',

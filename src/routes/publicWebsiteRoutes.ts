@@ -478,6 +478,13 @@ router.post('/reservations/:reference/cancel', async (req: Request, res: Respons
       { $set: { status: 'cancelled', cancellationReason: reason || 'Customer requested online cancellation', cancelledAt: new Date() } },
       { new: true }
     );
+
+    if (resv && (resv.roomId || resv.room)) {
+      const rId = resv.roomId || resv.room;
+      await StorageService.updateRoom(String(rId), { status: 'available', currentBookingId: null });
+    }
+    await StorageService.syncRoomStatusesWithBookings();
+
     res.json({ success: true, message: 'Reservation has been cancelled successfully', data: resv });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message });
