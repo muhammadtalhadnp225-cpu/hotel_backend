@@ -881,6 +881,47 @@ export class StorageService {
       if (filter.roomId) query.$or = [{ room: filter.roomId }, { roomId: filter.roomId }];
 
       const activeBookings = await (Booking as any).find(query).populate('guest').populate('room').sort({ createdAt: -1 }).exec();
+
+      // In Billing Ledger, ensure ALL preserved invoices/folios are included so financial history is never lost
+      if (filter.isBillingLedger || filter.includeArchived) {
+        try {
+          const invoices = await (Invoice as any).find({}).sort({ issuedAt: -1 }).exec();
+          const existingBookingNums = new Set(activeBookings.map((b: any) => String(b.bookingNumber || b._id)));
+
+          for (const inv of invoices) {
+            const num = String(inv.bookingNumber || inv.invoiceNumber?.replace('INV-', ''));
+            if (!existingBookingNums.has(num)) {
+              existingBookingNums.add(num);
+              activeBookings.push({
+                _id: inv._id,
+                bookingNumber: num,
+                reservationNumber: num,
+                guestName: inv.guestName || 'Valued Patron',
+                guestPhone: inv.guestPhone || '',
+                guestEmail: inv.guestEmail || '',
+                roomNumber: inv.roomNumber || 'N/A',
+                roomType: inv.roomType || 'Suite',
+                checkInDate: inv.checkInDate || inv.issuedAt,
+                checkOutDate: inv.checkOutDate || inv.issuedAt,
+                totalNights: inv.totalNights || 1,
+                pricePerNight: (inv.totalAmount || 0) / Math.max(1, inv.totalNights || 1),
+                subtotal: inv.subtotal || inv.totalAmount || 0,
+                tax: inv.tax || 0,
+                totalAmount: inv.totalAmount || 0,
+                paidAmount: inv.paidAmount || (inv.status === 'paid' ? inv.totalAmount : 0),
+                paymentStatus: inv.status === 'paid' ? 'paid' : (inv.paidAmount > 0 ? 'partially_paid' : 'pending'),
+                status: 'settled',
+                isArchivedReceipt: true,
+                createdAt: inv.issuedAt || inv.createdAt || new Date(),
+                updatedAt: inv.updatedAt || new Date(),
+              });
+            }
+          }
+        } catch (e) {
+          // ignore error
+        }
+      }
+
       return activeBookings;
     }
 
@@ -909,6 +950,40 @@ export class StorageService {
         return true;
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    // In InMemoryStore, include all preserved invoices for billing ledger
+    if (filter.isBillingLedger || filter.includeArchived) {
+      const existingBookingNums = new Set(bookingsList.map((b) => String(b.bookingNumber || b._id)));
+      for (const inv of InMemoryStore.invoices || []) {
+        const num = String(inv.bookingNumber || inv.invoiceNumber?.replace('INV-', ''));
+        if (!existingBookingNums.has(num)) {
+          existingBookingNums.add(num);
+          bookingsList.push({
+            _id: inv._id,
+            bookingNumber: num,
+            reservationNumber: num,
+            guestName: inv.guestName || 'Valued Patron',
+            guestPhone: inv.guestPhone || '',
+            guestEmail: inv.guestEmail || '',
+            roomNumber: inv.roomNumber || 'N/A',
+            roomType: inv.roomType || 'Suite',
+            checkInDate: inv.checkInDate || inv.issuedAt,
+            checkOutDate: inv.checkOutDate || inv.issuedAt,
+            totalNights: inv.totalNights || 1,
+            pricePerNight: (inv.totalAmount || 0) / Math.max(1, inv.totalNights || 1),
+            subtotal: inv.subtotal || inv.totalAmount || 0,
+            tax: inv.tax || 0,
+            totalAmount: inv.totalAmount || 0,
+            paidAmount: inv.paidAmount || (inv.status === 'paid' ? inv.totalAmount : 0),
+            paymentStatus: inv.status === 'paid' ? 'paid' : (inv.paidAmount > 0 ? 'partially_paid' : 'pending'),
+            status: 'settled',
+            isArchivedReceipt: true,
+            createdAt: inv.issuedAt || inv.createdAt || new Date(),
+            updatedAt: inv.updatedAt || new Date(),
+          });
+        }
+      }
+    }
 
     return bookingsList;
   }
@@ -1242,7 +1317,8 @@ export class StorageService {
           paymentMethod: booking.paymentMethod || 'credit_card',
           paymentReceiptNumber: `REC-${booking.bookingNumber || booking.reservationNumber}`,
           status: 'paid',
-          isDeleted: true,
+          isArchived: true,
+          isDeleted: false,
           issuedAt: booking.createdAt || new Date(),
           items: folioItems,
           notes: initialPaid > 0
@@ -1282,7 +1358,7 @@ export class StorageService {
           balance: 0,
           status: 'settled',
           isArchived: true,
-          isDeleted: true,
+          isDeleted: false,
           notes: initialPaid > 0
             ? `Cancelled before check-in. 10% Fee Retained (Rs. ${fee10Percent.toFixed(2)}), 90% Refund Issued (Rs. ${refund90Percent.toFixed(2)}).`
             : `Cancelled before check-in. No deposit charged.`,
@@ -1294,11 +1370,49 @@ export class StorageService {
           await new Folio(folioPayload).save();
         }
       } else {
-        // InMemory archive
+        // InMemory archive - preserve permanently
         InMemoryStore.invoices = InMemoryStore.invoices || [];
-        InMemoryStore.invoices = InMemoryStore.invoices.filter((i) => i.bookingNumber !== (booking.bookingNumber || booking.reservationNumber));
-        if (InMemoryStore.folios) {
-          InMemoryStore.folios = InMemoryStore.folios.filter((f) => f.bookingNumber !== (booking.bookingNumber || booking.reservationNumber));
+        const invNum = `INV-${booking.bookingNumber || booking.reservationNumber || Math.floor(10000 + Math.random() * 90000)}`;
+        const idx = InMemoryStore.invoices.findIndex((i) => i.bookingNumber === (booking.bookingNumber || booking.reservationNumber));
+        const invRecord = {
+          _id: new mongoose.Types.ObjectId().toString(),
+          invoiceNumber: invNum,
+          bookingNumber: booking.bookingNumber || booking.reservationNumber,
+          reservation: booking._id,
+          guest: booking.guest,
+          guestName: booking.guestName || 'Valued Patron',
+          guestEmail: booking.guestEmail || '',
+          guestPhone: booking.guestPhone || '',
+          roomNumber: booking.roomNumber || 'N/A',
+          roomType: booking.roomType || 'Suite',
+          checkInDate: booking.checkInDate || new Date(),
+          checkOutDate: booking.checkOutDate || new Date(),
+          totalNights: booking.totalNights || 1,
+          roomCharges: initialPaid > 0 ? fee10Percent : 0,
+          additionalServicesCharges: 0,
+          restaurantCharges: 0,
+          otherCharges: 0,
+          subtotal: initialPaid > 0 ? fee10Percent : 0,
+          discount: 0,
+          tax: 0,
+          taxRate: 0,
+          totalAmount: initialPaid > 0 ? fee10Percent : 0,
+          paidAmount: initialPaid > 0 ? fee10Percent : 0,
+          balance: 0,
+          paymentMethod: booking.paymentMethod || 'credit_card',
+          status: 'paid',
+          isArchived: true,
+          items: folioItems,
+          notes: initialPaid > 0
+            ? `Reservation Cancelled/Deleted before check-in. 10% Fee Retained: Rs. ${fee10Percent.toFixed(2)}, 90% Refunded: Rs. ${refund90Percent.toFixed(2)}.`
+            : `Reservation Cancelled/Deleted before check-in. No advance deposit was collected.`,
+          issuedAt: booking.createdAt || new Date(),
+        };
+
+        if (idx !== -1) {
+          InMemoryStore.invoices[idx] = invRecord;
+        } else {
+          InMemoryStore.invoices.push(invRecord);
         }
       }
     } catch (invErr) {
